@@ -32,20 +32,6 @@ TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY")
 
 
 # =========================================================
-# التحقق من المفاتيح
-# =========================================================
-
-if not BOT_TOKEN:
-    print("⚠️ BOT_TOKEN غير موجود")
-
-if not GEMINI_API_KEY:
-    print("⚠️ GEMINI_API_KEY غير موجود")
-
-if not TWELVE_DATA_API_KEY:
-    print("⚠️ TWELVE_DATA_API_KEY غير موجود")
-
-
-# =========================================================
 # Gemini
 # =========================================================
 
@@ -54,41 +40,25 @@ client = genai.Client(
 )
 
 
-# =========================================================
-# ترتيب موديلات Gemini
-# =========================================================
-
 MODEL_PRIORITY = [
-
     "gemini-3.5-flash",
-
     "gemini-3.6-flash",
-
     "gemini-3.7-flash",
-
     "gemini-3.8-flash",
-
     "gemini-3.1-flash-lite",
-
     "gemini-3.5-flash-lite",
-
     "gemini-2.5-flash",
-
     "gemini-2.5-flash-lite",
-
 ]
 
 
-# الموديل الحالي
 current_model = MODEL_PRIORITY[0]
 
-
-# محادثات المستخدمين
 user_chats = {}
 
 
 # =========================================================
-# Flask لـ Render
+# Flask - Render
 # =========================================================
 
 web_app = Flask(__name__)
@@ -96,7 +66,6 @@ web_app = Flask(__name__)
 
 @web_app.route("/")
 def home():
-
     return "Bot is running!"
 
 
@@ -139,9 +108,7 @@ def main_keyboard():
 
     ]
 
-    return InlineKeyboardMarkup(
-        keyboard
-    )
+    return InlineKeyboardMarkup(keyboard)
 
 
 # =========================================================
@@ -161,13 +128,11 @@ def back_keyboard():
 
     ]
 
-    return InlineKeyboardMarkup(
-        keyboard
-    )
+    return InlineKeyboardMarkup(keyboard)
 
 
 # =========================================================
-# جلب موديلات Gemini الموجودة فعليًا
+# موديلات Gemini
 # =========================================================
 
 def get_available_models():
@@ -196,24 +161,18 @@ def get_available_models():
                     ""
                 )
 
-            available.append(
-                name
-            )
+            available.append(name)
 
         return available
 
     except Exception as e:
 
         print(
-            f"⚠️ تعذر جلب قائمة الموديلات: {e}"
+            f"⚠️ تعذر جلب الموديلات: {e}"
         )
 
         return []
 
-
-# =========================================================
-# بناء قائمة الموديلات
-# =========================================================
 
 def build_model_list():
 
@@ -223,22 +182,18 @@ def build_model_list():
 
         result = []
 
-        # أولًا الموديلات التي اخترناها
         for model in MODEL_PRIORITY:
 
             if model in available:
 
-                result.append(
-                    model
-                )
+                result.append(model)
 
-        # ثم أي Flash إضافي موجود
         for model in available:
-
-            lower = model.lower()
 
             if model in result:
                 continue
+
+            lower = model.lower()
 
             if "flash" not in lower:
                 continue
@@ -252,20 +207,17 @@ def build_model_list():
             if "live" in lower:
                 continue
 
-            result.append(
-                model
-            )
+            result.append(model)
 
         if result:
 
             return result
 
-    # احتياط
     return MODEL_PRIORITY.copy()
 
 
 # =========================================================
-# إنشاء Chat
+# إنشاء Gemini Chat
 # =========================================================
 
 def create_gemini_chat():
@@ -282,21 +234,17 @@ def create_gemini_chat():
 
     ordered_models = []
 
-    # جرّب الموديل الحالي أولًا
     if current_model in models:
 
         ordered_models.append(
             current_model
         )
 
-    # ثم باقي الموديلات
     for model in models:
 
         if model not in ordered_models:
 
-            ordered_models.append(
-                model
-            )
+            ordered_models.append(model)
 
     last_error = None
 
@@ -337,8 +285,7 @@ def create_gemini_chat():
 
 
 # =========================================================
-# إرسال رسالة Gemini
-# مع Fallback تلقائي
+# إرسال رسالة Gemini مع Fallback
 # =========================================================
 
 def send_gemini_message(
@@ -350,35 +297,20 @@ def send_gemini_message(
 
     last_error = None
 
-    # -----------------------------------------------------
-    # إنشاء Chat إذا غير موجود
-    # -----------------------------------------------------
-
     if user_id not in user_chats:
 
         chat, model = create_gemini_chat()
 
         user_chats[user_id] = {
-
             "chat": chat,
-
             "model": model
-
         }
-
-    # -----------------------------------------------------
-    # الحصول على Chat الحالي
-    # -----------------------------------------------------
 
     chat_info = user_chats[user_id]
 
     chat = chat_info["chat"]
 
     model = chat_info["model"]
-
-    # -----------------------------------------------------
-    # تجربة الموديل الحالي
-    # -----------------------------------------------------
 
     try:
 
@@ -410,10 +342,6 @@ def send_gemini_message(
             f"❌ {model} فشل: {e}"
         )
 
-    # -----------------------------------------------------
-    # الموديل الحالي فشل
-    # -----------------------------------------------------
-
     user_chats.pop(
         user_id,
         None
@@ -425,14 +353,9 @@ def send_gemini_message(
 
     models = build_model_list()
 
-    # -----------------------------------------------------
-    # تجربة الموديلات البديلة
-    # -----------------------------------------------------
-
     for next_model in models:
 
         if next_model in tried_models:
-
             continue
 
         tried_models.add(
@@ -458,11 +381,8 @@ def send_gemini_message(
                 current_model = next_model
 
                 user_chats[user_id] = {
-
                     "chat": new_chat,
-
                     "model": next_model
-
                 }
 
                 print(
@@ -485,16 +405,9 @@ def send_gemini_message(
 
             continue
 
-    # -----------------------------------------------------
-    # كل الموديلات فشلت
-    # -----------------------------------------------------
-
     raise Exception(
-
         "جميع نماذج Gemini فشلت حاليًا.\n"
-
         f"آخر خطأ: {last_error}"
-
     )
 
 
@@ -509,27 +422,17 @@ async def start(
 
     user_id = update.effective_user.id
 
-    # تنظيف المحادثة القديمة
     user_chats.pop(
         user_id,
         None
     )
 
-    text = (
-
-        "🤖 أهلاً بك\n\n"
-
-        "اختر من القائمة:\n\n"
-
-        "🟢 دردشة مع Gemini\n"
-
-        "📊 تحليل الذهب"
-
-    )
-
     await update.message.reply_text(
 
-        text,
+        "🤖 أهلاً بك\n\n"
+        "اختر من القائمة:\n\n"
+        "🟢 دردشة مع Gemini\n"
+        "📊 تحليل الذهب",
 
         reply_markup=main_keyboard()
 
@@ -547,9 +450,7 @@ async def models_command(
 
     models = build_model_list()
 
-    text = (
-        "🤖 موديلات Gemini المتاحة:\n\n"
-    )
+    text = "🤖 موديلات Gemini المتاحة:\n\n"
 
     for i, model in enumerate(
         models,
@@ -559,8 +460,7 @@ async def models_command(
         if model == current_model:
 
             text += (
-                f"{i}. 🟢 {model} "
-                "← الحالي\n"
+                f"{i}. 🟢 {model} ← الحالي\n"
             )
 
         else:
@@ -575,7 +475,7 @@ async def models_command(
 
 
 # =========================================================
-# زر دردشة Gemini
+# دخول Gemini
 # =========================================================
 
 async def start_gemini_chat(
@@ -596,11 +496,8 @@ async def start_gemini_chat(
             chat, model = create_gemini_chat()
 
             user_chats[user_id] = {
-
                 "chat": chat,
-
                 "model": model
-
             }
 
         else:
@@ -609,23 +506,13 @@ async def start_gemini_chat(
                 user_id
             ]["model"]
 
-        text = (
-
-            "🟢 دردشة Gemini\n\n"
-
-            f"🤖 الموديل الحالي:\n"
-            f"{model}\n\n"
-
-            "✍️ اكتب رسالتك الآن 👇\n\n"
-
-            "🧠 إذا كان الموديل عليه ضغط، "
-            "سأنتقل تلقائيًا لموديل آخر."
-
-        )
-
         await query.edit_message_text(
 
-            text,
+            "🟢 دردشة Gemini\n\n"
+            f"🤖 الموديل الحالي:\n{model}\n\n"
+            "✍️ اكتب رسالتك الآن 👇\n\n"
+            "🧠 إذا كان الموديل عليه ضغط، "
+            "سأنتقل تلقائيًا لموديل آخر.",
 
             reply_markup=back_keyboard()
 
@@ -640,7 +527,6 @@ async def start_gemini_chat(
         await query.edit_message_text(
 
             "❌ حصل خطأ أثناء تشغيل Gemini.\n\n"
-
             f"{e}",
 
             reply_markup=main_keyboard()
@@ -649,7 +535,104 @@ async def start_gemini_chat(
 
 
 # =========================================================
-# تحليل الذهب
+# سعر الذهب
+# =========================================================
+
+def get_gold_price():
+
+    url = "https://api.twelvedata.com/price"
+
+    params = {
+        "symbol": "XAU/USD",
+        "apikey": TWELVE_DATA_API_KEY
+    }
+
+    response = requests.get(
+        url,
+        params=params,
+        timeout=15
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if "price" not in data:
+
+        raise Exception(
+            data.get(
+                "message",
+                "لم يتم العثور على سعر الذهب."
+            )
+        )
+
+    return data["price"]
+
+
+# =========================================================
+# بيانات M5 - آخر 24 ساعة
+# =========================================================
+
+def get_gold_m5():
+
+    url = "https://api.twelvedata.com/time_series"
+
+    params = {
+
+        "symbol": "XAU/USD",
+
+        "interval": "5min",
+
+        "outputsize": 288,
+
+        "order": "asc",
+
+        "timezone": "UTC",
+
+        "apikey": TWELVE_DATA_API_KEY
+
+    }
+
+    response = requests.get(
+
+        url,
+
+        params=params,
+
+        timeout=20
+
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if data.get("status") == "error":
+
+        raise Exception(
+
+            data.get(
+                "message",
+                "خطأ من Twelve Data"
+            )
+
+        )
+
+    values = data.get(
+        "values"
+    )
+
+    if not values:
+
+        raise Exception(
+            "لم تصل بيانات M5 من Twelve Data."
+        )
+
+    return values
+
+
+# =========================================================
+# تحليل الذهب - M5
 # =========================================================
 
 async def gold_analysis(
@@ -663,45 +646,96 @@ async def gold_analysis(
 
     await query.edit_message_text(
 
-        "📊 جاري جلب سعر الذهب..."
+        "📊 جاري تحليل الذهب...\n\n"
+        "⏳ أجلب سعر الذهب...\n"
+        "⏳ أجلب بيانات M5 لآخر 24 ساعة..."
 
     )
 
     try:
 
+        # السعر الحالي
         price = get_gold_price()
 
-        if price is None:
+        # بيانات M5
+        m5 = get_gold_m5()
 
-            await query.edit_message_text(
+        # أول وآخر شمعة
+        oldest = m5[0]
 
-                "❌ حصل خطأ أثناء جلب سعر الذهب.",
+        latest = m5[-1]
 
-                reply_markup=main_keyboard()
+        # أعلى سعر
+        highest = max(
 
-            )
+            float(candle["high"])
 
-            return
+            for candle in m5
+
+        )
+
+        # أقل سعر
+        lowest = min(
+
+            float(candle["low"])
+
+            for candle in m5
+
+        )
+
+        # أول إغلاق
+        first_close = float(
+            m5[0]["close"]
+        )
+
+        # آخر إغلاق
+        last_close = float(
+            m5[-1]["close"]
+        )
+
+        # الاتجاه الأولي
+        if last_close > first_close:
+
+            trend = "📈 صاعد"
+
+        elif last_close < first_close:
+
+            trend = "📉 هابط"
+
+        else:
+
+            trend = "➡️ جانبي"
 
         text = (
 
-            "📊 تحليل الذهب\n\n"
+            "📊 تحليل الذهب - M5\n\n"
 
             "🥇 XAU/USD\n"
 
             f"💰 السعر الحالي: {price}\n\n"
 
-            "⏳ المرحلة الحالية:\n"
+            f"🕯️ عدد شموع M5: {len(m5)}\n\n"
 
-            "جلب السعر فقط.\n\n"
+            f"🕐 البداية:\n"
+            f"{oldest['datetime']}\n\n"
 
-            "سنضيف لاحقًا:\n"
+            f"🕐 النهاية:\n"
+            f"{latest['datetime']}\n\n"
 
-            "📈 M5\n"
-            "📉 M1\n"
-            "📍 الدعم والمقاومة\n"
-            "🧠 تحليل Gemini\n"
-            "🎯 Entry / SL / TP"
+            f"📈 أعلى سعر: {highest:.2f}\n"
+
+            f"📉 أدنى سعر: {lowest:.2f}\n\n"
+
+            f"📊 أول إغلاق: {first_close:.2f}\n"
+
+            f"📊 آخر إغلاق: {last_close:.2f}\n\n"
+
+            f"🔎 الاتجاه الأولي: {trend}\n\n"
+
+            "✅ تم جلب M5 بنجاح.\n\n"
+
+            "المرحلة التالية:\n"
+            "📉 M1 لآخر 6 ساعات."
 
         )
 
@@ -713,16 +747,32 @@ async def gold_analysis(
 
         )
 
+        # Logs
+        print(
+            f"📊 M5 candles: {len(m5)}"
+        )
+
+        print(
+            f"📈 M5 highest: {highest}"
+        )
+
+        print(
+            f"📉 M5 lowest: {lowest}"
+        )
+
+        print(
+            f"🔎 M5 trend: {trend}"
+        )
+
     except Exception as e:
 
         print(
-            f"❌ خطأ الذهب: {e}"
+            f"❌ خطأ M5: {e}"
         )
 
         await query.edit_message_text(
 
-            "❌ حصل خطأ أثناء تحليل الذهب.\n\n"
-
+            "❌ حصل خطأ أثناء جلب بيانات M5.\n\n"
             f"{e}",
 
             reply_markup=main_keyboard()
@@ -731,7 +781,7 @@ async def gold_analysis(
 
 
 # =========================================================
-# رجوع للقائمة
+# الرجوع
 # =========================================================
 
 async def back_menu(
@@ -760,7 +810,7 @@ async def back_menu(
 
 
 # =========================================================
-# استقبال رسائل المستخدم
+# رسائل Gemini
 # =========================================================
 
 async def handle_message(
@@ -771,10 +821,6 @@ async def handle_message(
     user_id = update.effective_user.id
 
     message = update.message.text
-
-    # -----------------------------------------------------
-    # إذا المستخدم مش داخل Gemini
-    # -----------------------------------------------------
 
     if user_id not in user_chats:
 
@@ -788,10 +834,7 @@ async def handle_message(
 
         return
 
-    # -----------------------------------------------------
     # رسالة التفكير
-    # -----------------------------------------------------
-
     thinking_message = await update.message.reply_text(
 
         "🧠 Gemini يفكر..."
@@ -800,12 +843,10 @@ async def handle_message(
 
     try:
 
-        # مؤشر الكتابة
         await update.message.chat.send_action(
             action="typing"
         )
 
-        # إرسال الرسالة
         answer = send_gemini_message(
 
             user_id,
@@ -814,12 +855,11 @@ async def handle_message(
 
         )
 
-        # الموديل الذي رد
         current_user_model = user_chats[
             user_id
         ]["model"]
 
-        # حذف "Gemini يفكر..."
+        # حذف التفكير
         try:
 
             await thinking_message.delete()
@@ -846,7 +886,6 @@ async def handle_message(
             f"❌ Gemini النهائي: {e}"
         )
 
-        # حذف رسالة التفكير
         try:
 
             await thinking_message.delete()
@@ -855,7 +894,6 @@ async def handle_message(
 
             pass
 
-        # رسالة الخطأ
         await update.message.reply_text(
 
             "❌ لم أستطع الحصول على رد "
@@ -871,86 +909,30 @@ async def handle_message(
 
 
 # =========================================================
-# سعر الذهب - Twelve Data
-# =========================================================
-
-def get_gold_price():
-
-    url = (
-        "https://api.twelvedata.com/price"
-    )
-
-    params = {
-
-        "symbol": "XAU/USD",
-
-        "apikey": TWELVE_DATA_API_KEY
-
-    }
-
-    response = requests.get(
-
-        url,
-
-        params=params,
-
-        timeout=15
-
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    if "price" not in data:
-
-        raise Exception(
-
-            data.get(
-
-                "message",
-
-                "لم يتم العثور على سعر الذهب."
-
-            )
-
-        )
-
-    return data["price"]
-
-
-# =========================================================
 # تشغيل البوت
 # =========================================================
 
 def main():
 
-    # -----------------------------------------------------
-    # التحقق
-    # -----------------------------------------------------
-
     if not BOT_TOKEN:
 
         raise Exception(
-            "BOT_TOKEN غير موجود."
+            "BOT_TOKEN غير موجود في Environment Variables"
         )
 
     if not GEMINI_API_KEY:
 
         raise Exception(
-            "GEMINI_API_KEY غير موجود."
+            "GEMINI_API_KEY غير موجود في Environment Variables"
         )
 
     if not TWELVE_DATA_API_KEY:
 
         raise Exception(
-            "TWELVE_DATA_API_KEY غير موجود."
+            "TWELVE_DATA_API_KEY غير موجود في Environment Variables"
         )
 
-    # -----------------------------------------------------
-    # تشغيل Flask
-    # -----------------------------------------------------
-
+    # Flask
     threading.Thread(
 
         target=run_web_server,
@@ -959,10 +941,7 @@ def main():
 
     ).start()
 
-    # -----------------------------------------------------
     # Telegram
-    # -----------------------------------------------------
-
     app = (
         Application
         .builder()
@@ -970,88 +949,50 @@ def main():
         .build()
     )
 
-    # -----------------------------------------------------
     # Commands
-    # -----------------------------------------------------
-
     app.add_handler(
-
         CommandHandler(
             "start",
             start
         )
-
     )
 
     app.add_handler(
-
         CommandHandler(
             "models",
             models_command
         )
-
     )
 
-    # -----------------------------------------------------
     # Buttons
-    # -----------------------------------------------------
-
     app.add_handler(
-
         CallbackQueryHandler(
-
             start_gemini_chat,
-
             pattern="^gemini_chat$"
-
         )
-
     )
 
     app.add_handler(
-
         CallbackQueryHandler(
-
             gold_analysis,
-
             pattern="^gold_analysis$"
-
         )
-
     )
 
     app.add_handler(
-
         CallbackQueryHandler(
-
             back_menu,
-
             pattern="^back_menu$"
-
         )
-
     )
 
-    # -----------------------------------------------------
-    # الرسائل
-    # -----------------------------------------------------
-
+    # Messages
     app.add_handler(
-
         MessageHandler(
-
-            filters.TEXT
-            & ~filters.COMMAND,
-
+            filters.TEXT & ~filters.COMMAND,
             handle_message
-
         )
-
     )
-
-    # -----------------------------------------------------
-    # Logs
-    # -----------------------------------------------------
 
     print(
         "==================================="
@@ -1077,14 +1018,8 @@ def main():
         "==================================="
     )
 
-    # -----------------------------------------------------
-    # تشغيل البوت
-    # -----------------------------------------------------
-
     app.run_polling(
-
         drop_pending_updates=True
-
     )
 
 
