@@ -18,7 +18,7 @@ from telegram.ext import (
 
 load_dotenv()
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT1_TOKEN = os.getenv("BOT1_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
 
@@ -130,7 +130,7 @@ def main():
         daemon=True
     ).start()
 
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(BOT1_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
 
