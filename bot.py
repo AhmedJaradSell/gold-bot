@@ -3,8 +3,13 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 
 load_dotenv()
 
@@ -28,20 +33,39 @@ def start_web_server():
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    keyboard = [
+        [InlineKeyboardButton("🟢 START", callback_data="start_analysis")]
+    ]
+
     await update.message.reply_text(
-        "🤖 Gold AI Trader\n\nالبوت يعمل بنجاح."
+        "🤖 Gold AI Trader\n\n"
+        "جاهز لتحليل الذهب.",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+
+async def start_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    await query.edit_message_text(
+        "🔍 جاري فحص الذهب والمتداولين...\n\n"
+        "⏳ انتظر..."
     )
 
 
 def main():
-    # خادم صغير حتى يتعرف Render أن الخدمة تعمل
     threading.Thread(
         target=start_web_server,
         daemon=True
     ).start()
 
     app = Application.builder().token(BOT_TOKEN).build()
+
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(
+        CallbackQueryHandler(start_analysis, pattern="^start_analysis$")
+    )
 
     print("Gold Bot is running...")
     app.run_polling()
