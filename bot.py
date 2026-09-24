@@ -1,11 +1,5 @@
 import os
-import threading
-import asyncio
-from http.server import BaseHTTPRequestHandler, HTTPServer
-
 import requests
-from dotenv import load_dotenv
-from google import genai
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -17,128 +11,140 @@ from telegram.ext import (
     filters,
 )
 
-load_dotenv()
+from google import genai
+
+
+# =========================
+# Environment Variables
+# =========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-TICKERLAYER_API_KEY = os.getenv("TICKERLAYER_API_KEY")
-
-PORT = int(os.environ.get("PORT", 10000))
+TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY")
 
 GEMINI_MODEL = "gemini-3.5-flash"
 
-gemini = genai.Client(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-# محادثات Gemini لكل مستخدم
+# حفظ حالة دردشة Gemini لكل مستخدم
 user_chats = {}
 
-
 # =========================
-# Render Web Server
-# =========================
-
-class HealthCheck(BaseHTTPRequestHandler):
-
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Gold Bot is running")
-
-    def log_message(self, format, *args):
-        pass
-
-
-def start_web_server():
-
-    server = HTTPServer(
-        ("0.0.0.0", PORT),
-        HealthCheck
-    )
-
-    server.serve_forever()
-
-
-# =========================
-# القائمة الرئيسية
+# Main Keyboard
 # =========================
 
 def main_keyboard():
-
     keyboard = [
         [
             InlineKeyboardButton(
                 "🟢 دردشة مع Gemini",
-                callback_data="gemini_chat"
-            )
-        ],
-        [
+                callback_data="gemini"
+            ),
             InlineKeyboardButton(
                 "📊 تحليل الذهب",
-                callback_data="gold_analysis"
-            )
-        ],
+                callback_data="gold"
+            ),
+        ]
     ]
 
     return InlineKeyboardMarkup(keyboard)
 
 
-async def show_main_menu(update, text="🤖 Gold AI Trader\n\nاختر ماذا تريد:"):
+# =========================
+# Back Button
+# =========================
 
-    if update.callback_query:
+def back_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                "🔙 رجوع للقائمة",
+                callback_data="back"
+            )
+        ]
+    ]
 
-        await update.callback_query.edit_message_text(
-            text,
-            reply_markup=main_keyboard()
-        )
-
-    else:
-
-        await update.message.reply_text(
-            text,
-            reply_markup=main_keyboard()
-        )
+    return InlineKeyboardMarkup(keyboard)
 
 
 # =========================
-# /start
+# Start
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
-    context.user_data["chat_mode"] = False
-
-    await show_main_menu(update)
-
-
-# =========================
-# زر الرجوع
-# =========================
-
-async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    context.user_data["chat_mode"] = False
-
-    await update.callback_query.edit_message_text(
-        "🤖 Gold AI Trader\n\nاختر ماذا تريد:",
+    await update.message.reply_text(
+        "أهلًا 👋\nاختار من القائمة:",
         reply_markup=main_keyboard()
     )
 
 
 # =========================
-# جلب سعر الذهب
+# Gemini Chat
+# =========================
+
+async def start_gemini_chat(update: Update):
+
+    user_id = update.effective_user.id
+
+    user_chats[user_id] = []
+
+    await update.callback_query.edit_message_text(
+        "🟢 أنت الآن في دردشة Gemini.\n\n"
+        "اكتب رسالتك وأنا أرسلها إلى Gemini.\n\n"
+        "للخروج اضغط رجوع:",
+        reply_markup=back_keyboard()
+    )
+
+
+async def gemini_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user_id = update.effective_user.id
+
+    # إذا المستخدم ليس داخل دردشة Gemini
+    if user_id not in user_chats:
+        return
+
+    text = update.message.text
+
+    try:
+
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=text
+        )
+
+        answer = response.text
+
+        await update.message.reply_text(
+            answer,
+            reply_markup=back_keyboard()
+        )
+
+    except Exception as e:
+
+        await update.message.reply_text(
+            f"❌ حصل خطأ أثناء الاتصال بـ Gemini:\n\n{e}",
+            reply_markup=back_keyboard()
+        )
+
+
+# =========================
+# Twelve Data - Gold Price
 # =========================
 
 def get_gold_price():
 
-    url = "https://api.tickerlayer.com/commodities/quote/XAUUSD"
+    url = "https://api.twelvedata.com/price"
 
-    headers = {
-        "x-api-key": TICKERLAYER_API_KEY
+    params = {
+        "symbol": "XAU/USD",
+        "apikey": TWELVE_DATA_API_KEY
     }
 
     response = requests.get(
         url,
-        headers=headers,
+        params=params,
         timeout=15
     )
 
@@ -148,7 +154,7 @@ def get_gold_price():
 
 
 # =========================
-# أزرار البوت
+# Button Handler
 # =========================
 
 async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -157,222 +163,96 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await query.answer()
 
-    # =====================
+    # -------------------------
     # Gemini
-    # =====================
+    # -------------------------
 
-    if query.data == "gemini_chat":
+    if query.data == "gemini":
 
-        context.user_data["chat_mode"] = True
+        await start_gemini_chat(update)
+
+        return
+
+    # -------------------------
+    # Back
+    # -------------------------
+
+    if query.data == "back":
 
         user_id = update.effective_user.id
 
-        if user_id not in user_chats:
-
-            user_chats[user_id] = gemini.chats.create(
-                model=GEMINI_MODEL
-            )
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "🔙 رجوع للقائمة",
-                    callback_data="back_menu"
-                )
-            ]
-        ]
+        user_chats.pop(user_id, None)
 
         await query.edit_message_text(
-            "🤖 دردشة Gemini مفعّلة.\n\n"
-            "اكتب رسالتك الآن.\n\n"
-            "يمكنك الرجوع للقائمة من الزر بالأسفل 👇",
-            reply_markup=InlineKeyboardMarkup(keyboard)
+            "القائمة الرئيسية 👇",
+            reply_markup=main_keyboard()
         )
 
-    # =====================
-    # تحليل الذهب
-    # =====================
+        return
 
-    elif query.data == "gold_analysis":
+    # -------------------------
+    # Gold
+    # -------------------------
 
-        context.user_data["chat_mode"] = False
+    if query.data == "gold":
 
         await query.edit_message_text(
-            "🥇 جاري جلب سعر الذهب..."
+            "⏳ بجلب سعر الذهب من Twelve Data..."
         )
 
         try:
 
-            data = await asyncio.to_thread(
-                get_gold_price
-            )
+            data = get_gold_price()
 
-            bid = data.get("bid")
-            ask = data.get("ask")
-            timestamp = data.get("timestamp")
+            if "price" not in data:
 
-            if bid is not None and ask is not None:
-
-                mid = (float(bid) + float(ask)) / 2
-
-                text = (
-                    "🥇 XAUUSD — الذهب\n\n"
-                    f"💵 Bid: {bid}\n"
-                    f"💵 Ask: {ask}\n"
-                    f"📌 السعر المتوسط: {mid:.2f}\n"
+                await query.edit_message_text(
+                    "❌ Twelve Data لم يرجع السعر.\n\n"
+                    f"{data}",
+                    reply_markup=main_keyboard()
                 )
 
-            else:
+                return
 
-                text = (
-                    "🥇 XAUUSD — الذهب\n\n"
-                    f"البيانات:\n{data}"
-                )
-
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "🔙 رجوع للقائمة",
-                        callback_data="back_menu"
-                    )
-                ]
-            ]
+            price = data["price"]
 
             await query.edit_message_text(
-                text,
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                f"🟡 XAU/USD\n\n"
+                f"💰 السعر الحالي:\n"
+                f"{price}",
+                reply_markup=main_keyboard()
             )
 
         except Exception as e:
 
-            print("TickerLayer error:", e)
-
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "🔙 رجوع للقائمة",
-                        callback_data="back_menu"
-                    )
-                ]
-            ]
-
             await query.edit_message_text(
-                "❌ حصل خطأ أثناء جلب سعر الذهب.\n\n"
-                f"الخطأ: {str(e)}",
-                reply_markup=InlineKeyboardMarkup(keyboard)
+                f"❌ حصل خطأ أثناء جلب سعر الذهب:\n\n"
+                f"{e}",
+                reply_markup=main_keyboard()
             )
 
-    # =====================
-    # رجوع
-    # =====================
-
-    elif query.data == "back_menu":
-
-        await back_to_menu(update, context)
-
-
-# =========================
-# رسائل Gemini
-# =========================
-
-async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not context.user_data.get("chat_mode"):
         return
 
-    user_id = update.effective_user.id
-    message = update.message.text
-
-    await update.message.reply_text(
-        "🤖 Gemini يفكر..."
-    )
-
-    try:
-
-        chat = user_chats.get(user_id)
-
-        if chat is None:
-
-            chat = gemini.chats.create(
-                model=GEMINI_MODEL
-            )
-
-            user_chats[user_id] = chat
-
-        response = await asyncio.to_thread(
-            chat.send_message,
-            message=message
-        )
-
-        await update.message.reply_text(
-            response.text
-        )
-
-    except Exception as e:
-
-        print("Gemini error:", e)
-
-        context.user_data["chat_mode"] = False
-
-        keyboard = [
-            [
-                InlineKeyboardButton(
-                    "🔙 رجوع للقائمة",
-                    callback_data="back_menu"
-                )
-            ]
-        ]
-
-        await update.message.reply_text(
-            "❌ حصل خطأ أثناء الاتصال بـ Gemini.",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
 
 # =========================
-# /models
-# =========================
-
-async def list_models(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    try:
-
-        models = gemini.models.list()
-
-        text = "📋 الموديلات المتاحة:\n\n"
-
-        for model in models:
-
-            text += f"• {model.name}\n"
-
-        await update.message.reply_text(text)
-
-    except Exception as e:
-
-        await update.message.reply_text(
-            f"❌ حصل خطأ:\n{e}"
-        )
-
-
-# =========================
-# تشغيل البوت
+# Main
 # =========================
 
 def main():
 
-    threading.Thread(
-        target=start_web_server,
-        daemon=True
-    ).start()
+    if not BOT_TOKEN:
+        raise ValueError("BOT_TOKEN غير موجود")
+
+    if not GEMINI_API_KEY:
+        raise ValueError("GEMINI_API_KEY غير موجود")
+
+    if not TWELVE_DATA_API_KEY:
+        raise ValueError("TWELVE_DATA_API_KEY غير موجود")
 
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(
         CommandHandler("start", start)
-    )
-
-    app.add_handler(
-        CommandHandler("models", list_models)
     )
 
     app.add_handler(
@@ -382,11 +262,11 @@ def main():
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
-            chat_message
+            gemini_message
         )
     )
 
-    print("Gold Bot is running...")
+    print("Bot is running...")
 
     app.run_polling()
 
