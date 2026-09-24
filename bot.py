@@ -28,7 +28,7 @@ gemini = genai.Client(api_key=GEMINI_API_KEY)
 user_chats = {}
 
 # الموديل
-GEMINI_MODEL = "gemini-3.8-flash"
+GEMINI_MODEL = "gemini-2.5-flash"
 
 
 class HealthCheck(BaseHTTPRequestHandler):
