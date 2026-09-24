@@ -3,6 +3,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
+from google import genai
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -14,7 +16,10 @@ from telegram.ext import (
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
+
+gemini = genai.Client(api_key=GEMINI_API_KEY)
 
 
 class HealthCheck(BaseHTTPRequestHandler):
@@ -38,8 +43,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     await update.message.reply_text(
-        "🤖 Gold AI Trader\n\n"
-        "جاهز لتحليل الذهب.",
+        "🤖 Gold AI Trader\n\nجاهز لتحليل الذهب.",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -49,9 +53,25 @@ async def start_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     await query.edit_message_text(
-        "🔍 جاري فحص الذهب والمتداولين...\n\n"
-        "⏳ انتظر..."
+        "🤖 جاري الاتصال بـ Gemini...\n\n⏳ لحظة..."
     )
+
+    try:
+        response = gemini.models.generate_content(
+            model="gemini-3.8-flash",
+            contents="قل: تم الاتصال بـ Gemini بنجاح، واكتب جملة قصيرة بالعربية."
+        )
+
+        await query.message.reply_text(
+            "✅ Gemini متصل!\n\n" + response.text
+        )
+
+    except Exception as e:
+        await query.message.reply_text(
+            "❌ حصل خطأ أثناء الاتصال بـ Gemini.\n\n"
+            "راجع Logs في Render."
+        )
+        print("Gemini error:", e)
 
 
 def main():
