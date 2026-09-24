@@ -9,6 +9,7 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
 )
+
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -22,7 +23,7 @@ from google import genai
 
 
 # =========================================================
-# الإعدادات
+# Environment Variables
 # =========================================================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
@@ -44,7 +45,10 @@ if not TWELVE_DATA_API_KEY:
 # Gemini
 # =========================================================
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = genai.Client(
+    api_key=GEMINI_API_KEY
+)
+
 
 MODEL_PRIORITY = [
     "gemini-3.5-flash",
@@ -58,12 +62,15 @@ MODEL_PRIORITY = [
 ]
 
 
-# محادثات Gemini العادية
+# =========================================================
+# Gemini Chat Memory
+# =========================================================
+
 user_chats = {}
 
 
 # =========================================================
-# Flask - حتى يظل Render شغال
+# Flask Server
 # =========================================================
 
 web_app = Flask(__name__)
@@ -75,130 +82,157 @@ def home():
 
 
 def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    web_app.run(host="0.0.0.0", port=port)
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            10000
+        )
+    )
+
+    web_app.run(
+        host="0.0.0.0",
+        port=port
+    )
 
 
 # =========================================================
-# أزرار القائمة
+# Main Keyboard
 # =========================================================
 
 def main_keyboard():
+
     keyboard = [
+
         [
             InlineKeyboardButton(
                 "🟢 دردشة مع Gemini",
                 callback_data="gemini_chat"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "💰 السعر الحالي",
                 callback_data="current_price"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "📊 تحليل الذهب M5",
                 callback_data="gold_analysis"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "📉 تحليل الذهب M1",
                 callback_data="m1_analysis"
             )
         ],
+
         [
             InlineKeyboardButton(
                 "🤖 تحليل Gemini",
                 callback_data="gemini_analysis"
             )
         ],
+
     ]
 
-    return InlineKeyboardMarkup(keyboard)
-
-
-def back_keyboard():
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "🔙 رجوع للقائمة",
-                callback_data="back_menu"
-            )
-        ]
-    ])
+    return InlineKeyboardMarkup(
+        keyboard
+    )
 
 
 # =========================================================
-# جلب موديلات Gemini المتاحة
+# Back Button
+# =========================================================
+
+def back_keyboard():
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "🔙 رجوع للقائمة",
+                    callback_data="back_menu"
+                )
+            ]
+        ]
+    )
+
+
+# =========================================================
+# Available Gemini Models
 # =========================================================
 
 def get_available_models():
+
     try:
+
         models = client.models.list()
 
         available = []
 
         for model in models:
-            name = getattr(model, "name", "")
+
+            name = getattr(
+                model,
+                "name",
+                ""
+            )
 
             if not name:
                 continue
 
             if name.startswith("models/"):
-                name = name.replace("models/", "", 1)
+
+                name = name.replace(
+                    "models/",
+                    "",
+                    1
+                )
 
             available.append(name)
 
         return available
 
     except Exception:
+
         return []
 
 
 def build_model_list():
+
     available = get_available_models()
 
     if not available:
+
         return MODEL_PRIORITY
 
     result = []
 
     for model in MODEL_PRIORITY:
+
         if model in available:
+
             result.append(model)
 
-    return result or MODEL_PRIORITY
+    if result:
+
+        return result
+
+    return MODEL_PRIORITY
 
 
 # =========================================================
-# إنشاء محادثة Gemini
+# Create Gemini Chat
 # =========================================================
 
 def create_gemini_chat():
-    models = build_model_list()
 
-    for model_name in models:
-        try:
-            chat = client.chats.create(
-                model=model_name
-            )
-
-            return chat, model_name
-
-        except Exception:
-            continue
-
-    raise Exception("لم أستطع تشغيل أي موديل Gemini متاح.")
-
-
-# =========================================================
-# إرسال رسالة إلى Gemini مع نظام Fallback
-# =========================================================
-
-def send_gemini_message(prompt):
     models = build_model_list()
 
     last_error = None
@@ -206,14 +240,55 @@ def send_gemini_message(prompt):
     for model_name in models:
 
         try:
+
+            chat = client.chats.create(
+                model=model_name
+            )
+
+            return chat, model_name
+
+        except Exception as e:
+
+            last_error = e
+
+            continue
+
+    if last_error:
+
+        raise last_error
+
+    raise Exception(
+        "لم أستطع تشغيل أي موديل Gemini."
+    )
+
+
+# =========================================================
+# Send Gemini Message With Fallback
+# =========================================================
+
+def send_gemini_message(prompt):
+
+    models = build_model_list()
+
+    last_error = None
+
+    for model_name in models:
+
+        try:
+
             response = client.models.generate_content(
                 model=model_name,
                 contents=prompt
             )
 
-            text = getattr(response, "text", None)
+            text = getattr(
+                response,
+                "text",
+                None
+            )
 
             if text:
+
                 return text
 
             last_error = Exception(
@@ -221,24 +296,34 @@ def send_gemini_message(prompt):
             )
 
         except Exception as e:
+
             last_error = e
+
             continue
 
     if last_error:
+
         raise last_error
 
-    raise Exception("فشل الاتصال بجميع موديلات Gemini.")
+    raise Exception(
+        "فشل الاتصال بجميع موديلات Gemini."
+    )
 
 
 # =========================================================
 # /start
 # =========================================================
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     await update.message.reply_text(
+
         "👋 أهلاً بك\n\n"
         "اختر من القائمة:",
+
         reply_markup=main_keyboard()
     )
 
@@ -247,17 +332,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # /models
 # =========================================================
 
-async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def models_command(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
 
     try:
+
         models = build_model_list()
 
-        text = "🤖 موديلات Gemini المتاحة:\n\n"
+        text = "🤖 موديلات Gemini:\n\n"
 
         for model in models:
+
             text += f"• {model}\n"
 
-        await update.message.reply_text(text)
+        await update.message.reply_text(
+            text
+        )
 
     except Exception as e:
 
@@ -267,7 +359,7 @@ async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================================================
-# دردشة Gemini
+# Start Gemini Chat
 # =========================================================
 
 async def start_gemini_chat(
@@ -276,6 +368,7 @@ async def start_gemini_chat(
 ):
 
     query = update.callback_query
+
     await query.answer()
 
     user_id = update.effective_user.id
@@ -287,23 +380,26 @@ async def start_gemini_chat(
         user_chats[user_id] = chat
 
         await query.edit_message_text(
+
             "🟢 تم تشغيل دردشة Gemini.\n\n"
-            "اكتب أي شيء وسأرسله إلى Gemini.\n\n"
-            f"🤖 الموديل: {model_name}\n\n"
-            "للرجوع للقائمة اضغط الزر:",
+            "اكتب رسالتك الآن.\n\n"
+            f"🤖 الموديل: {model_name}",
+
             reply_markup=back_keyboard()
         )
 
     except Exception as e:
 
         await query.edit_message_text(
+
             f"❌ حصل خطأ أثناء تشغيل Gemini:\n\n{e}",
+
             reply_markup=back_keyboard()
         )
 
 
 # =========================================================
-# رسالة دردشة Gemini العادية
+# Normal Gemini Chat
 # =========================================================
 
 async def handle_message(
@@ -314,6 +410,7 @@ async def handle_message(
     user_id = update.effective_user.id
 
     if user_id not in user_chats:
+
         return
 
     text = update.message.text
@@ -326,11 +423,18 @@ async def handle_message(
 
         chat = user_chats[user_id]
 
-        response = chat.send_message(text)
+        response = chat.send_message(
+            text
+        )
 
-        reply = getattr(response, "text", None)
+        reply = getattr(
+            response,
+            "text",
+            None
+        )
 
         if not reply:
+
             reply = "❌ Gemini لم يرجع ردًا."
 
         await thinking_message.delete()
@@ -343,18 +447,23 @@ async def handle_message(
     except Exception as e:
 
         try:
+
             await thinking_message.delete()
+
         except Exception:
+
             pass
 
         await update.message.reply_text(
+
             f"❌ حصل خطأ أثناء الاتصال بـ Gemini:\n\n{e}",
+
             reply_markup=back_keyboard()
         )
 
 
 # =========================================================
-# السعر الحالي
+# Current Gold Price
 # =========================================================
 
 def get_gold_price():
@@ -362,13 +471,19 @@ def get_gold_price():
     url = "https://api.twelvedata.com/price"
 
     params = {
+
         "symbol": "XAU/USD",
-        "apikey": TWELVE_DATA_API_KEY,
+
+        "apikey": TWELVE_DATA_API_KEY
+
     }
 
     response = requests.get(
+
         url,
+
         params=params,
+
         timeout=15
     )
 
@@ -377,6 +492,7 @@ def get_gold_price():
     data = response.json()
 
     if "price" not in data:
+
         raise Exception(
             data.get(
                 "message",
@@ -387,12 +503,17 @@ def get_gold_price():
     return data["price"]
 
 
+# =========================================================
+# Current Price Button
+# =========================================================
+
 async def current_price(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE
 ):
 
     query = update.callback_query
+
     await query.answer()
 
     try:
@@ -400,22 +521,26 @@ async def current_price(
         price = get_gold_price()
 
         await query.edit_message_text(
+
             "💰 السعر الحالي للذهب\n\n"
             "🥇 XAU/USD\n\n"
             f"💵 السعر: {price}",
+
             reply_markup=main_keyboard()
         )
 
     except Exception as e:
 
         await query.edit_message_text(
+
             f"❌ تعذر جلب السعر الحالي.\n\n{e}",
+
             reply_markup=main_keyboard()
         )
 
 
 # =========================================================
-# M5 - آخر 24 ساعة
+# Get M5 - Last 24 Hours
 # =========================================================
 
 def get_gold_m5():
@@ -423,20 +548,28 @@ def get_gold_m5():
     url = "https://api.twelvedata.com/time_series"
 
     params = {
+
         "symbol": "XAU/USD",
+
         "interval": "5min",
 
-        # 24 ساعة × 60 ÷ 5 = 288 شمعة
+        # 24 hours × 12 candles = 288
         "outputsize": 288,
 
         "order": "asc",
+
         "timezone": "UTC",
-        "apikey": TWELVE_DATA_API_KEY,
+
+        "apikey": TWELVE_DATA_API_KEY
+
     }
 
     response = requests.get(
+
         url,
+
         params=params,
+
         timeout=30
     )
 
@@ -445,6 +578,7 @@ def get_gold_m5():
     data = response.json()
 
     if data.get("status") == "error":
+
         raise Exception(
             data.get(
                 "message",
@@ -455,6 +589,7 @@ def get_gold_m5():
     values = data.get("values")
 
     if not values:
+
         raise Exception(
             "لم تصل بيانات M5."
         )
@@ -463,7 +598,7 @@ def get_gold_m5():
 
 
 # =========================================================
-# M1 - آخر 6 ساعات
+# Get M1 - Last 6 Hours
 # =========================================================
 
 def get_gold_m1():
@@ -471,20 +606,28 @@ def get_gold_m1():
     url = "https://api.twelvedata.com/time_series"
 
     params = {
+
         "symbol": "XAU/USD",
+
         "interval": "1min",
 
-        # 6 ساعات × 60 = 360 شمعة
+        # 6 hours × 60 candles = 360
         "outputsize": 360,
 
         "order": "asc",
+
         "timezone": "UTC",
-        "apikey": TWELVE_DATA_API_KEY,
+
+        "apikey": TWELVE_DATA_API_KEY
+
     }
 
     response = requests.get(
+
         url,
+
         params=params,
+
         timeout=30
     )
 
@@ -493,6 +636,7 @@ def get_gold_m1():
     data = response.json()
 
     if data.get("status") == "error":
+
         raise Exception(
             data.get(
                 "message",
@@ -503,6 +647,7 @@ def get_gold_m1():
     values = data.get("values")
 
     if not values:
+
         raise Exception(
             "لم تصل بيانات M1."
         )
@@ -511,7 +656,7 @@ def get_gold_m1():
 
 
 # =========================================================
-# تنظيف الشموع
+# Format Raw Candles
 # =========================================================
 
 def format_candles(candles):
@@ -521,18 +666,34 @@ def format_candles(candles):
     for candle in candles:
 
         result.append({
-            "time": candle.get("datetime"),
-            "open": candle.get("open"),
-            "high": candle.get("high"),
-            "low": candle.get("low"),
-            "close": candle.get("close"),
+
+            "time": candle.get(
+                "datetime"
+            ),
+
+            "open": candle.get(
+                "open"
+            ),
+
+            "high": candle.get(
+                "high"
+            ),
+
+            "low": candle.get(
+                "low"
+            ),
+
+            "close": candle.get(
+                "close"
+            )
+
         })
 
     return result
 
 
 # =========================================================
-# تحليل M5 القديم - بدون تحليل فعلي من البوت
+# M5 Button
 # =========================================================
 
 async def gold_analysis(
@@ -541,38 +702,35 @@ async def gold_analysis(
 ):
 
     query = update.callback_query
+
     await query.answer()
 
     try:
 
         candles = get_gold_m5()
 
-        if len(candles) < 2:
-            raise Exception("بيانات M5 غير كافية.")
-
-        first_close = candles[0]["close"]
-        last_close = candles[-1]["close"]
-
         await query.edit_message_text(
+
             "📊 بيانات الذهب M5\n\n"
-            f"🕯️ عدد الشموع: {len(candles)}\n"
-            f"💵 أول إغلاق: {first_close}\n"
-            f"💵 آخر إغلاق: {last_close}\n\n"
-            "ℹ️ التحليل التفصيلي يتم بواسطة زر "
-            "🤖 تحليل Gemini.",
+            f"🕯️ عدد الشموع: {len(candles)}\n\n"
+            "للحصول على التحليل الكامل استخدم:\n"
+            "🤖 تحليل Gemini",
+
             reply_markup=main_keyboard()
         )
 
     except Exception as e:
 
         await query.edit_message_text(
+
             f"❌ تعذر جلب بيانات M5.\n\n{e}",
+
             reply_markup=main_keyboard()
         )
 
 
 # =========================================================
-# تحليل M1 القديم - بدون تحليل فعلي من البوت
+# M1 Button
 # =========================================================
 
 async def m1_analysis(
@@ -581,38 +739,35 @@ async def m1_analysis(
 ):
 
     query = update.callback_query
+
     await query.answer()
 
     try:
 
         candles = get_gold_m1()
 
-        if len(candles) < 2:
-            raise Exception("بيانات M1 غير كافية.")
-
-        first_close = candles[0]["close"]
-        last_close = candles[-1]["close"]
-
         await query.edit_message_text(
+
             "📉 بيانات الذهب M1\n\n"
-            f"🕯️ عدد الشموع: {len(candles)}\n"
-            f"💵 أول إغلاق: {first_close}\n"
-            f"💵 آخر إغلاق: {last_close}\n\n"
-            "ℹ️ التحليل التفصيلي يتم بواسطة زر "
-            "🤖 تحليل Gemini.",
+            f"🕯️ عدد الشموع: {len(candles)}\n\n"
+            "للحصول على التحليل الكامل استخدم:\n"
+            "🤖 تحليل Gemini",
+
             reply_markup=main_keyboard()
         )
 
     except Exception as e:
 
         await query.edit_message_text(
+
             f"❌ تعذر جلب بيانات M1.\n\n{e}",
+
             reply_markup=main_keyboard()
         )
 
 
 # =========================================================
-# تحليل Gemini للذهب
+# Gemini Gold Analysis
 # =========================================================
 
 async def gemini_gold_analysis(
@@ -621,132 +776,208 @@ async def gemini_gold_analysis(
 ):
 
     query = update.callback_query
+
     await query.answer()
 
-    # رسالة الحالة
     try:
+
+        # -------------------------------------------------
+        # Step 1
+        # -------------------------------------------------
+
         await query.edit_message_text(
+
             "🧠 Gemini يحلل الآن...\n\n"
             "⏳ أجمع السعر الحالي..."
         )
 
-        # -------------------------------------------------
-        # السعر
-        # -------------------------------------------------
-
         price = get_gold_price()
 
-        await query.edit_message_text(
-            "🧠 Gemini يحلل الآن...\n\n"
-            "✅ تم جلب السعر الحالي.\n"
-            "⏳ أجمع بيانات M5..."
-        )
+        # -------------------------------------------------
+        # Step 2
+        # -------------------------------------------------
 
-        # -------------------------------------------------
-        # M5
-        # -------------------------------------------------
+        await query.edit_message_text(
+
+            "🧠 Gemini يحلل الآن...\n\n"
+            "✅ السعر الحالي\n"
+            "⏳ أجمع شموع M5..."
+        )
 
         m5_raw = get_gold_m5()
-        m5_candles = format_candles(m5_raw)
 
-        await query.edit_message_text(
-            "🧠 Gemini يحلل الآن...\n\n"
-            "✅ تم جلب السعر الحالي.\n"
-            "✅ تم جلب شموع M5.\n"
-            "⏳ أجمع بيانات M1..."
+        m5_candles = format_candles(
+            m5_raw
         )
 
         # -------------------------------------------------
-        # M1
+        # Step 3
         # -------------------------------------------------
 
+        await query.edit_message_text(
+
+            "🧠 Gemini يحلل الآن...\n\n"
+            "✅ السعر الحالي\n"
+            f"✅ {len(m5_candles)} شمعة M5\n"
+            "⏳ أجمع شموع M1..."
+        )
+
         m1_raw = get_gold_m1()
-        m1_candles = format_candles(m1_raw)
+
+        m1_candles = format_candles(
+            m1_raw
+        )
+
+        # -------------------------------------------------
+        # Step 4
+        # -------------------------------------------------
 
         await query.edit_message_text(
+
             "🧠 Gemini يحلل الآن...\n\n"
-            "✅ تم جلب السعر الحالي.\n"
-            f"✅ تم جلب {len(m5_candles)} شمعة M5.\n"
-            f"✅ تم جلب {len(m1_candles)} شمعة M1.\n"
+            "✅ السعر الحالي\n"
+            f"✅ {len(m5_candles)} شمعة M5\n"
+            f"✅ {len(m1_candles)} شمعة M1\n"
             "⏳ أرسل البيانات إلى Gemini...\n"
-            "⏳ Gemini يقوم بالتحليل..."
+            "⏳ جاري التحليل..."
         )
 
         # =================================================
-        # بناء البيانات الخام
+        # Prompt
         # =================================================
 
         prompt = f"""
 أنت محلل فني للذهب XAU/USD.
 
-حلل بنفسك بيانات الشموع الخام التالية:
-- M5: آخر 24 ساعة
-- M1: آخر 6 ساعات
-- كل شمعة تحتوي Time / Open / High / Low / Close
-- السعر الحالي: {price}
+حلل بنفسك بيانات الشموع الخام التي سأرسلها لك.
 
-لا تعتمد على أي تحليل مسبق من البوت.
+البيانات:
 
-أريد جوابًا مختصرًا وواضحًا، وليس شرحًا طويلًا.
+السعر الحالي:
+{price}
 
-حلل:
-1. اتجاه M5 وبنية السوق.
-2. اتجاه M1 وبنية السوق.
-3. هل M1 يؤكد M5 أم يخالفه؟
-4. أهم دعم ومقاومة.
-5. الزخم وحركة السعر الأخيرة.
+M5 - آخر 24 ساعة:
+{m5_candles}
 
-ثم أعطني توصية تداول مبنية على تحليلك:
+M1 - آخر 6 ساعات:
+{m1_candles}
 
-📊 الاتجاه: BUY / SELL / WAIT
+مهم جدًا:
 
-إذا كانت BUY أو SELL:
-🎯 Entry: السعر
-🛑 Stop Loss: السعر
-💰 Take Profit: السعر
+لا يوجد تحليل مسبق من البوت.
+
+لا أريد منك الاعتماد على أي اتجاه أو نتيجة محسوبة مسبقًا.
+
+حلل الشموع بنفسك.
+
+ركز على:
+- اتجاه M5
+- اتجاه M1
+- بنية السوق
+- Higher High
+- Higher Low
+- Lower High
+- Lower Low
+- الزخم
+- الدعم
+- المقاومة
+- الاختراقات
+- الرفض
+- التوافق أو التعارض بين M5 وM1
+
+بعد التحليل أعطني توصية تداول.
+
+إذا كانت هناك فرصة واضحة:
+
+📊 الاتجاه: BUY أو SELL
+
+🎯 Entry: رقم واحد
+
+🛑 Stop Loss: رقم واحد
+
+💰 Take Profit: رقم واحد
+
 📐 Risk/Reward: النسبة
 
 🔥 السبب:
-اذكر باختصار أهم الأسباب التي اعتمدت عليها من M5 وM1.
+اذكر أهم سببين أو ثلاثة فقط.
 
 إذا لم تكن هناك فرصة واضحة:
+
 📊 الاتجاه: WAIT
-واشرح السبب باختصار.
 
-مهم:
-- لا تخترع معلومات غير موجودة في الشموع.
-- لا تضمن الربح.
-- Entry وSL وTP يجب أن تكون مبنية على تحليل الشموع والدعم والمقاومة.
-- لا تكتب مقدمة طويلة.
+⚠️ السبب:
+اذكره باختصار.
+
+شروط مهمة:
+
+- Entry وSL وTP يجب أن تكون مبنية على تحليل الشموع.
+- لا تعطِ أكثر من Entry واحد.
+- لا تعطِ أكثر من Stop Loss واحد.
+- لا تعطِ أكثر من Take Profit واحد.
+- لا تعطِ قائمة طويلة من المستويات.
 - لا تكرر بيانات الشموع.
-- اجعل الرد النهائي مختصرًا ومناسبًا لرسالة Telegram.
-- الحد الأقصى للرد حوالي 2500 حرف.
+- لا تكتب شرحًا طويلًا.
+- اجعل الرد مختصرًا ومناسبًا لـTelegram.
+- الحد الأقصى للرد حوالي 2000 حرف.
+- لا تضمن الربح.
+- لا تقل إن الصفقة مؤكدة.
+
+أريد النتيجة بهذا الشكل تقريبًا:
+
+🤖 تحليل Gemini
+
+📊 الاتجاه: BUY/SELL/WAIT
+
+📈 M5: ...
+📉 M1: ...
+🔄 التوافق: ...
+
+🎯 Entry: ...
+🛑 SL: ...
+💰 TP: ...
+📐 R/R: ...
+
+🔥 السبب:
+...
+
+⚠️ التحليل ليس ضمانًا لحركة السعر.
 """
-"""
+
         # =================================================
-        # إرسال Gemini
+        # Gemini
         # =================================================
 
-        result = send_gemini_message(prompt)
+        result = send_gemini_message(
+            prompt
+        )
+
+        # -------------------------------------------------
+        # Final Result
+        # -------------------------------------------------
 
         await query.edit_message_text(
+
             "🤖 تحليل Gemini للذهب\n\n"
             f"{result}",
+
             reply_markup=main_keyboard()
         )
 
     except Exception as e:
 
         await query.edit_message_text(
+
             "❌ حصلت مشكلة أثناء تحليل Gemini.\n\n"
             f"{e}\n\n"
             "🔄 جرّب مرة ثانية.",
+
             reply_markup=main_keyboard()
         )
 
 
 # =========================================================
-# الرجوع للقائمة
+# Back To Menu
 # =========================================================
 
 async def back_menu(
@@ -755,16 +986,21 @@ async def back_menu(
 ):
 
     query = update.callback_query
+
     await query.answer()
 
     user_id = update.effective_user.id
 
-    # إيقاف وضع الدردشة
-    user_chats.pop(user_id, None)
+    user_chats.pop(
+        user_id,
+        None
+    )
 
     await query.edit_message_text(
+
         "🏠 القائمة الرئيسية\n\n"
         "اختر ما تريد:",
+
         reply_markup=main_keyboard()
     )
 
@@ -775,7 +1011,6 @@ async def back_menu(
 
 def main():
 
-    # تشغيل Flask في Thread
     threading.Thread(
         target=run_web_server,
         daemon=True
@@ -789,11 +1024,17 @@ def main():
 
     # Commands
     application.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
     application.add_handler(
-        CommandHandler("models", models_command)
+        CommandHandler(
+            "models",
+            models_command
+        )
     )
 
     # Buttons
@@ -839,7 +1080,7 @@ def main():
         )
     )
 
-    # رسائل الدردشة
+    # Normal text messages
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
@@ -853,8 +1094,9 @@ def main():
 
 
 # =========================================================
-# تشغيل
+# Start
 # =========================================================
 
 if __name__ == "__main__":
+
     main()
