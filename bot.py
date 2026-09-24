@@ -39,7 +39,6 @@ client = genai.Client(
     api_key=GEMINI_API_KEY
 )
 
-
 MODEL_PRIORITY = [
     "gemini-3.5-flash",
     "gemini-3.6-flash",
@@ -50,7 +49,6 @@ MODEL_PRIORITY = [
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
 ]
-
 
 current_model = MODEL_PRIORITY[0]
 
@@ -101,8 +99,22 @@ def main_keyboard():
 
         [
             InlineKeyboardButton(
-                "📊 تحليل الذهب",
+                "💰 السعر الحالي",
+                callback_data="current_price"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "📊 تحليل الذهب M5",
                 callback_data="gold_analysis"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "📉 تحليل الذهب M1",
+                callback_data="m1_analysis"
             )
         ]
 
@@ -430,9 +442,7 @@ async def start(
     await update.message.reply_text(
 
         "🤖 أهلاً بك\n\n"
-        "اختر من القائمة:\n\n"
-        "🟢 دردشة مع Gemini\n"
-        "📊 تحليل الذهب",
+        "اختر من القائمة:",
 
         reply_markup=main_keyboard()
 
@@ -535,7 +545,7 @@ async def start_gemini_chat(
 
 
 # =========================================================
-# سعر الذهب
+# سعر الذهب الحالي
 # =========================================================
 
 def get_gold_price():
@@ -567,6 +577,50 @@ def get_gold_price():
         )
 
     return data["price"]
+
+
+# =========================================================
+# زر السعر الحالي
+# =========================================================
+
+async def current_price(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    try:
+
+        price = get_gold_price()
+
+        await query.edit_message_text(
+
+            "💰 السعر الحالي للذهب\n\n"
+            "🥇 XAU/USD\n\n"
+            f"💵 السعر: {price}\n\n"
+            "🕐 السعر من Twelve Data.",
+
+            reply_markup=main_keyboard()
+
+        )
+
+    except Exception as e:
+
+        print(
+            f"❌ خطأ السعر الحالي: {e}"
+        )
+
+        await query.edit_message_text(
+
+            "❌ تعذر جلب السعر الحالي.\n\n"
+            f"{e}",
+
+            reply_markup=main_keyboard()
+
+        )
 
 
 # =========================================================
@@ -632,7 +686,7 @@ def get_gold_m5():
 
 
 # =========================================================
-# تحليل الذهب - M5
+# تحليل الذهب M5
 # =========================================================
 
 async def gold_analysis(
@@ -646,7 +700,7 @@ async def gold_analysis(
 
     await query.edit_message_text(
 
-        "📊 جاري تحليل الذهب...\n\n"
+        "📊 جاري تحليل الذهب M5...\n\n"
         "⏳ أجلب سعر الذهب...\n"
         "⏳ أجلب بيانات M5 لآخر 24 ساعة..."
 
@@ -654,18 +708,14 @@ async def gold_analysis(
 
     try:
 
-        # السعر الحالي
         price = get_gold_price()
 
-        # بيانات M5
         m5 = get_gold_m5()
 
-        # أول وآخر شمعة
         oldest = m5[0]
 
         latest = m5[-1]
 
-        # أعلى سعر
         highest = max(
 
             float(candle["high"])
@@ -674,7 +724,6 @@ async def gold_analysis(
 
         )
 
-        # أقل سعر
         lowest = min(
 
             float(candle["low"])
@@ -683,17 +732,14 @@ async def gold_analysis(
 
         )
 
-        # أول إغلاق
         first_close = float(
             m5[0]["close"]
         )
 
-        # آخر إغلاق
         last_close = float(
             m5[-1]["close"]
         )
 
-        # الاتجاه الأولي
         if last_close > first_close:
 
             trend = "📈 صاعد"
@@ -732,11 +778,8 @@ async def gold_analysis(
 
             f"🔎 الاتجاه الأولي: {trend}\n\n"
 
-            "✅ تم جلب M5 بنجاح.\n\n"
-
-            "المرحلة التالية:\n"
-            "📉 M1 لآخر 6 ساعات."
-
+            "ℹ️ هذا اتجاه أولي فقط، "
+            "وليس إشارة دخول."
         )
 
         await query.edit_message_text(
@@ -745,23 +788,6 @@ async def gold_analysis(
 
             reply_markup=main_keyboard()
 
-        )
-
-        # Logs
-        print(
-            f"📊 M5 candles: {len(m5)}"
-        )
-
-        print(
-            f"📈 M5 highest: {highest}"
-        )
-
-        print(
-            f"📉 M5 lowest: {lowest}"
-        )
-
-        print(
-            f"🔎 M5 trend: {trend}"
         )
 
     except Exception as e:
@@ -781,7 +807,205 @@ async def gold_analysis(
 
 
 # =========================================================
-# الرجوع
+# بيانات M1 - آخر 6 ساعات
+# =========================================================
+
+def get_gold_m1():
+
+    url = "https://api.twelvedata.com/time_series"
+
+    params = {
+
+        "symbol": "XAU/USD",
+
+        "interval": "1min",
+
+        "outputsize": 360,
+
+        "order": "asc",
+
+        "timezone": "UTC",
+
+        "apikey": TWELVE_DATA_API_KEY
+
+    }
+
+    response = requests.get(
+
+        url,
+
+        params=params,
+
+        timeout=25
+
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if data.get("status") == "error":
+
+        raise Exception(
+
+            data.get(
+                "message",
+                "خطأ من Twelve Data"
+            )
+
+        )
+
+    values = data.get(
+        "values"
+    )
+
+    if not values:
+
+        raise Exception(
+            "لم تصل بيانات M1 من Twelve Data."
+        )
+
+    return values
+
+
+# =========================================================
+# تحليل الذهب M1 - آخر 6 ساعات
+# =========================================================
+
+async def m1_analysis(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    query = update.callback_query
+
+    await query.answer()
+
+    await query.edit_message_text(
+
+        "📉 جاري تحليل الذهب M1...\n\n"
+        "⏳ أجلب بيانات M1 لآخر 6 ساعات..."
+
+    )
+
+    try:
+
+        price = get_gold_price()
+
+        m1 = get_gold_m1()
+
+        oldest = m1[0]
+
+        latest = m1[-1]
+
+        highest = max(
+
+            float(candle["high"])
+
+            for candle in m1
+
+        )
+
+        lowest = min(
+
+            float(candle["low"])
+
+            for candle in m1
+
+        )
+
+        first_close = float(
+            m1[0]["close"]
+        )
+
+        last_close = float(
+            m1[-1]["close"]
+        )
+
+        if last_close > first_close:
+
+            trend = "📈 صاعد"
+
+        elif last_close < first_close:
+
+            trend = "📉 هابط"
+
+        else:
+
+            trend = "➡️ جانبي"
+
+        text = (
+
+            "📉 تحليل الذهب - M1\n\n"
+
+            "🥇 XAU/USD\n"
+
+            f"💰 السعر الحالي: {price}\n\n"
+
+            f"🕯️ عدد شموع M1: {len(m1)}\n\n"
+
+            f"🕐 البداية:\n"
+            f"{oldest['datetime']}\n\n"
+
+            f"🕐 النهاية:\n"
+            f"{latest['datetime']}\n\n"
+
+            f"📈 أعلى سعر: {highest:.2f}\n"
+
+            f"📉 أدنى سعر: {lowest:.2f}\n\n"
+
+            f"📊 أول إغلاق: {first_close:.2f}\n"
+
+            f"📊 آخر إغلاق: {last_close:.2f}\n\n"
+
+            f"🔎 الاتجاه الأولي: {trend}\n\n"
+
+            "ℹ️ هذا تحليل أولي لـ M1 فقط، "
+            "وليس إشارة دخول."
+        )
+
+        await query.edit_message_text(
+
+            text,
+
+            reply_markup=main_keyboard()
+
+        )
+
+        print(
+            f"📉 M1 candles: {len(m1)}"
+        )
+
+        print(
+            f"📈 M1 highest: {highest}"
+        )
+
+        print(
+            f"📉 M1 lowest: {lowest}"
+        )
+
+        print(
+            f"🔎 M1 trend: {trend}"
+        )
+
+    except Exception as e:
+
+        print(
+            f"❌ خطأ M1: {e}"
+        )
+
+        await query.edit_message_text(
+
+            "❌ حصل خطأ أثناء جلب بيانات M1.\n\n"
+            f"{e}",
+
+            reply_markup=main_keyboard()
+
+        )
+
+
+# =========================================================
+# الرجوع للقائمة
 # =========================================================
 
 async def back_menu(
@@ -834,7 +1058,6 @@ async def handle_message(
 
         return
 
-    # رسالة التفكير
     thinking_message = await update.message.reply_text(
 
         "🧠 Gemini يفكر..."
@@ -859,7 +1082,6 @@ async def handle_message(
             user_id
         ]["model"]
 
-        # حذف التفكير
         try:
 
             await thinking_message.delete()
@@ -868,7 +1090,6 @@ async def handle_message(
 
             pass
 
-        # إرسال الرد
         await update.message.reply_text(
 
             answer +
@@ -917,22 +1138,21 @@ def main():
     if not BOT_TOKEN:
 
         raise Exception(
-            "BOT_TOKEN غير موجود في Environment Variables"
+            "BOT_TOKEN غير موجود."
         )
 
     if not GEMINI_API_KEY:
 
         raise Exception(
-            "GEMINI_API_KEY غير موجود في Environment Variables"
+            "GEMINI_API_KEY غير موجود."
         )
 
     if not TWELVE_DATA_API_KEY:
 
         raise Exception(
-            "TWELVE_DATA_API_KEY غير موجود في Environment Variables"
+            "TWELVE_DATA_API_KEY غير موجود."
         )
 
-    # Flask
     threading.Thread(
 
         target=run_web_server,
@@ -941,7 +1161,6 @@ def main():
 
     ).start()
 
-    # Telegram
     app = (
         Application
         .builder()
@@ -964,7 +1183,7 @@ def main():
         )
     )
 
-    # Buttons
+    # Gemini
     app.add_handler(
         CallbackQueryHandler(
             start_gemini_chat,
@@ -972,6 +1191,15 @@ def main():
         )
     )
 
+    # السعر الحالي
+    app.add_handler(
+        CallbackQueryHandler(
+            current_price,
+            pattern="^current_price$"
+        )
+    )
+
+    # M5
     app.add_handler(
         CallbackQueryHandler(
             gold_analysis,
@@ -979,6 +1207,15 @@ def main():
         )
     )
 
+    # M1
+    app.add_handler(
+        CallbackQueryHandler(
+            m1_analysis,
+            pattern="^m1_analysis$"
+        )
+    )
+
+    # الرجوع
     app.add_handler(
         CallbackQueryHandler(
             back_menu,
@@ -986,7 +1223,7 @@ def main():
         )
     )
 
-    # Messages
+    # الرسائل
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
