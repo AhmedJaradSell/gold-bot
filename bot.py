@@ -18,7 +18,7 @@ from telegram.ext import (
 
 load_dotenv()
 
-BOT1_TOKEN = os.getenv("BOT1_TOKEN")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
 
@@ -26,6 +26,9 @@ gemini = genai.Client(api_key=GEMINI_API_KEY)
 
 # محادثات Gemini لكل مستخدم
 user_chats = {}
+
+# الموديل
+GEMINI_MODEL = "gemini-3.8-flash"
 
 
 class HealthCheck(BaseHTTPRequestHandler):
@@ -69,7 +72,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         if user_id not in user_chats:
             user_chats[user_id] = gemini.chats.create(
-                model="gemini-3.8-flash"
+                model=GEMINI_MODEL
             )
 
         await query.edit_message_text(
@@ -89,6 +92,45 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def send_to_gemini(chat, message):
+    """
+    إرسال الرسالة إلى Gemini مع إعادة المحاولة
+    إذا كان الخطأ 503.
+    """
+
+    max_attempts = 4
+
+    for attempt in range(max_attempts):
+        try:
+            response = await asyncio.to_thread(
+                chat.send_message,
+                message=message
+            )
+
+            return response
+
+        except Exception as e:
+
+            error_text = str(e)
+
+            # إذا كان الخطأ 503 نعيد المحاولة
+            if "503" in error_text or "UNAVAILABLE" in error_text:
+
+                if attempt < max_attempts - 1:
+
+                    wait_time = 2 ** attempt
+
+                    print(
+                        f"Gemini 503 - retrying in {wait_time} seconds..."
+                    )
+
+                    await asyncio.sleep(wait_time)
+
+                    continue
+
+            raise e
+
+
 async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.user_data.get("chat_mode"):
@@ -100,26 +142,37 @@ async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Gemini يفكر...")
 
     try:
+
         chat = user_chats.get(user_id)
 
         if chat is None:
             chat = gemini.chats.create(
-                model="gemini-3.8-flash"
+                model=GEMINI_MODEL
             )
+
             user_chats[user_id] = chat
 
-        response = await asyncio.to_thread(
-            chat.send_message,
-            message=message
+        response = await send_to_gemini(
+            chat,
+            message
         )
 
-        await update.message.reply_text(response.text)
+        if response.text:
+            await update.message.reply_text(
+                response.text
+            )
+        else:
+            await update.message.reply_text(
+                "⚠️ Gemini لم يرجع نصًا."
+            )
 
     except Exception as e:
+
         print("Gemini error:", e)
 
         await update.message.reply_text(
-            "❌ حصل خطأ أثناء الاتصال بـ Gemini."
+            "❌ Gemini غير متاح حاليًا.\n"
+            "حاول مرة أخرى بعد قليل."
         )
 
 
@@ -130,9 +183,15 @@ def main():
         daemon=True
     ).start()
 
-    app = Application.builder().token(BOT1_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .build()
+    )
 
-    app.add_handler(CommandHandler("start", start))
+    app.add_handler(
+        CommandHandler("start", start)
+    )
 
     app.add_handler(
         CallbackQueryHandler(button_handler)
