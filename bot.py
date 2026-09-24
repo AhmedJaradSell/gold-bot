@@ -1,5 +1,6 @@
 import os
 import threading
+import asyncio
 import requests
 
 from flask import Flask
@@ -30,13 +31,15 @@ GEMINI_MODEL = "gemini-3.5-flash"
 # GEMINI
 # =========================
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = genai.Client(
+    api_key=GEMINI_API_KEY
+)
 
 user_chats = {}
 
 
 # =========================
-# FLASK SERVER FOR RENDER
+# FLASK FOR RENDER
 # =========================
 
 web_app = Flask(__name__)
@@ -48,7 +51,11 @@ def home():
 
 
 def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
+
+    port = int(
+        os.environ.get("PORT", 10000)
+    )
+
     web_app.run(
         host="0.0.0.0",
         port=port
@@ -101,7 +108,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
-    # إيقاف وضع Gemini لهذا المستخدم
     user_chats.pop(user_id, None)
 
     await update.message.reply_text(
@@ -119,7 +125,9 @@ async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
 
-        models = client.models.list()
+        models = await asyncio.to_thread(
+            lambda: list(client.models.list())
+        )
 
         text = "🤖 النماذج المتاحة:\n\n"
 
@@ -127,10 +135,16 @@ async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         for model in models:
 
-            name = getattr(model, "name", "")
+            name = getattr(
+                model,
+                "name",
+                ""
+            )
 
             if name:
+
                 text += f"• {name}\n"
+
                 count += 1
 
             if count >= 20:
@@ -146,21 +160,21 @@ async def models_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# GEMINI CHAT
+# START GEMINI
 # =========================
 
 async def start_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
 
-    await query.answer()
-
     user_id = query.from_user.id
 
     try:
 
-        chat = client.chats.create(
-            model=GEMINI_MODEL
+        chat = await asyncio.to_thread(
+            lambda: client.chats.create(
+                model=GEMINI_MODEL
+            )
         )
 
         user_chats[user_id] = chat
@@ -168,7 +182,8 @@ async def start_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "🟢 أنت الآن في دردشة مع Gemini.\n\n"
             "اكتب أي سؤال وسأرسله إلى Gemini.\n\n"
-            "وعندما تريد الخروج اضغط الزر بالأسفل.",
+            "⏳ إذا تأخر Gemini، سيبقى الطلب قيد المعالجة "
+            "حتى يصل الرد.",
             reply_markup=back_keyboard()
         )
 
@@ -181,51 +196,96 @@ async def start_gemini(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# GEMINI MESSAGES
+# SEND TO GEMINI
+# =========================
+
+async def send_to_gemini(chat, user_text):
+
+    # تشغيل طلب Gemini في Thread منفصل
+    # حتى لا يجمّد بوت Telegram
+    response = await asyncio.to_thread(
+        lambda: chat.send_message(user_text)
+    )
+
+    return response
+
+
+# =========================
+# GEMINI CHAT MESSAGE
 # =========================
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
-    # إذا المستخدم داخل دردشة Gemini
-    if user_id in user_chats:
-
-        user_text = update.message.text
-
-        try:
-
-            chat = user_chats[user_id]
-
-            response = chat.send_message(user_text)
-
-            answer = response.text
-
-            if not answer:
-                answer = "❌ Gemini لم يرجع ردًا."
-
-            await update.message.reply_text(
-                answer,
-                reply_markup=back_keyboard()
-            )
-
-        except Exception as e:
-
-            await update.message.reply_text(
-                f"❌ حصل خطأ أثناء الاتصال بـ Gemini:\n\n{e}",
-                reply_markup=back_keyboard()
-            )
-
-    else:
+    # إذا المستخدم ليس داخل Gemini
+    if user_id not in user_chats:
 
         await update.message.reply_text(
             "اختر أحد الخيارات من القائمة 👇",
             reply_markup=main_keyboard()
         )
 
+        return
+
+    user_text = update.message.text
+
+    chat = user_chats[user_id]
+
+    # رسالة انتظار
+    waiting_message = await update.message.reply_text(
+        "🤖 Gemini يفكر...\n\n"
+        "⏳ قد يستغرق الرد بعض الوقت، "
+        "والبوت سيبقى شغالًا بشكل طبيعي."
+    )
+
+    try:
+
+        # لا يوجد Timeout هنا
+        # الطلب سيستمر حتى يرد Gemini
+        response = await send_to_gemini(
+            chat,
+            user_text
+        )
+
+        answer = response.text
+
+        if not answer:
+
+            answer = "❌ Gemini لم يرجع نصًا."
+
+        # حذف رسالة الانتظار
+        try:
+
+            await waiting_message.delete()
+
+        except Exception:
+
+            pass
+
+        # إرسال الرد
+        await update.message.reply_text(
+            answer,
+            reply_markup=back_keyboard()
+        )
+
+    except Exception as e:
+
+        try:
+
+            await waiting_message.edit_text(
+                f"❌ حصل خطأ أثناء الاتصال بـ Gemini:\n\n{e}"
+            )
+
+        except Exception:
+
+            await update.message.reply_text(
+                f"❌ حصل خطأ أثناء الاتصال بـ Gemini:\n\n{e}"
+            )
+
 
 # =========================
-# GOLD PRICE - TWELVE DATA
+# GOLD PRICE
 # =========================
 
 def get_gold_price():
@@ -249,21 +309,23 @@ def get_gold_price():
 
 
 # =========================
-# GOLD ANALYSIS BUTTON
+# GOLD ANALYSIS
 # =========================
 
 async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
 
-    await query.answer()
-
     try:
 
-        data = get_gold_price()
+        data = await asyncio.to_thread(
+            get_gold_price
+        )
 
-        # لو API رجع خطأ
-        if "code" in data and "message" in data:
+        if (
+            "code" in data
+            and "message" in data
+        ):
 
             await query.edit_message_text(
                 f"❌ خطأ من Twelve Data:\n\n"
@@ -287,7 +349,7 @@ async def gold_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await query.edit_message_text(
             "📊 تحليل الذهب\n\n"
-            f"🥇 XAU/USD\n"
+            "🥇 XAU/USD\n"
             f"💰 السعر الحالي: {price}\n\n"
             "⏳ المرحلة الحالية هي جلب البيانات.\n"
             "سنضيف لاحقًا تحليل M5 و M1 والدعم والمقاومة.",
@@ -310,11 +372,8 @@ async def back_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
 
-    await query.answer()
-
     user_id = query.from_user.id
 
-    # الخروج من Gemini
     user_chats.pop(user_id, None)
 
     await query.edit_message_text(
@@ -332,17 +391,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
 
+    # الرد فورًا على Telegram
+    try:
+
+        await query.answer()
+
+    except Exception:
+
+        pass
+
     if query.data == "gemini_chat":
 
-        await start_gemini(update, context)
+        await start_gemini(
+            update,
+            context
+        )
 
     elif query.data == "gold_analysis":
 
-        await gold_analysis(update, context)
+        await gold_analysis(
+            update,
+            context
+        )
 
     elif query.data == "back_menu":
 
-        await back_menu(update, context)
+        await back_menu(
+            update,
+            context
+        )
 
 
 # =========================
@@ -366,21 +443,30 @@ def main():
         print("❌ TWELVE_DATA_API_KEY غير موجود")
         return
 
-    # تشغيل بوت Telegram
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = Application.builder().token(
+        BOT_TOKEN
+    ).build()
 
     # Commands
     app.add_handler(
-        CommandHandler("start", start)
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
     app.add_handler(
-        CommandHandler("models", models_command)
+        CommandHandler(
+            "models",
+            models_command
+        )
     )
 
     # Buttons
     app.add_handler(
-        CallbackQueryHandler(button_handler)
+        CallbackQueryHandler(
+            button_handler
+        )
     )
 
     # Messages
@@ -391,7 +477,7 @@ def main():
         )
     )
 
-    # تشغيل Flask في Thread منفصل
+    # Flask / Render
     threading.Thread(
         target=run_web_server,
         daemon=True
@@ -399,7 +485,7 @@ def main():
 
     print("Bot is running...")
 
-    # تشغيل Telegram polling
+    # Telegram
     app.run_polling()
 
 
@@ -408,4 +494,5 @@ def main():
 # =========================
 
 if __name__ == "__main__":
+
     main()
