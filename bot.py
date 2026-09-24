@@ -1,5 +1,6 @@
 import os
 import threading
+import asyncio
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from dotenv import load_dotenv
@@ -10,7 +11,9 @@ from telegram.ext import (
     Application,
     CommandHandler,
     CallbackQueryHandler,
+    MessageHandler,
     ContextTypes,
+    filters,
 )
 
 load_dotenv()
@@ -20,6 +23,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 PORT = int(os.environ.get("PORT", 10000))
 
 gemini = genai.Client(api_key=GEMINI_API_KEY)
+
+# محادثات Gemini لكل مستخدم
+user_chats = {}
 
 
 class HealthCheck(BaseHTTPRequestHandler):
@@ -38,43 +44,87 @@ def start_web_server():
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["chat_mode"] = False
+
     keyboard = [
-        [InlineKeyboardButton("🟢 START", callback_data="start_analysis")]
+        [InlineKeyboardButton("🟢 دردشة مع Gemini", callback_data="gemini_chat")],
+        [InlineKeyboardButton("📊 تحليل الذهب", callback_data="gold_analysis")],
     ]
 
     await update.message.reply_text(
-        "🤖 Gold AI Trader\n\nجاهز لتحليل الذهب.",
+        "🤖 Gold AI Trader\n\nاختر ماذا تريد:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
-async def start_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    await query.edit_message_text(
-        "🤖 جاري الاتصال بـ Gemini...\n\n⏳ لحظة..."
-    )
+    if query.data == "gemini_chat":
+
+        context.user_data["chat_mode"] = True
+
+        user_id = update.effective_user.id
+
+        if user_id not in user_chats:
+            user_chats[user_id] = gemini.chats.create(
+                model="gemini-3.8-flash"
+            )
+
+        await query.edit_message_text(
+            "🤖 دردشة Gemini مفعّلة.\n\n"
+            "اكتب رسالتك الآن، وسأرسلها إلى Gemini.\n\n"
+            "مثال:\n"
+            "ما هو الذكاء الاصطناعي؟"
+        )
+
+    elif query.data == "gold_analysis":
+
+        context.user_data["chat_mode"] = False
+
+        await query.edit_message_text(
+            "📊 تحليل الذهب\n\n"
+            "هذه الوظيفة سنبنيها في الخطوة القادمة."
+        )
+
+
+async def chat_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not context.user_data.get("chat_mode"):
+        return
+
+    user_id = update.effective_user.id
+    message = update.message.text
+
+    await update.message.reply_text("🤖 Gemini يفكر...")
 
     try:
-        response = gemini.models.generate_content(
-            model="gemini-3.8-flash",
-            contents="قل: تم الاتصال بـ Gemini بنجاح، واكتب جملة قصيرة بالعربية."
+        chat = user_chats.get(user_id)
+
+        if chat is None:
+            chat = gemini.chats.create(
+                model="gemini-3.8-flash"
+            )
+            user_chats[user_id] = chat
+
+        response = await asyncio.to_thread(
+            chat.send_message,
+            message=message
         )
 
-        await query.message.reply_text(
-            "✅ Gemini متصل!\n\n" + response.text
-        )
+        await update.message.reply_text(response.text)
 
     except Exception as e:
-        await query.message.reply_text(
-            "❌ حصل خطأ أثناء الاتصال بـ Gemini.\n\n"
-            "راجع Logs في Render."
-        )
         print("Gemini error:", e)
+
+        await update.message.reply_text(
+            "❌ حصل خطأ أثناء الاتصال بـ Gemini."
+        )
 
 
 def main():
+
     threading.Thread(
         target=start_web_server,
         daemon=True
@@ -83,11 +133,20 @@ def main():
     app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+
     app.add_handler(
-        CallbackQueryHandler(start_analysis, pattern="^start_analysis$")
+        CallbackQueryHandler(button_handler)
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            chat_message
+        )
     )
 
     print("Gold Bot is running...")
+
     app.run_polling()
 
 
