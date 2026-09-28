@@ -80,7 +80,6 @@ MODEL_PRIORITY = [
 def get_available_models():
 
     try:
-
         models = client.models.list()
 
         result = []
@@ -123,7 +122,6 @@ def build_model_list():
     available = get_available_models()
 
     if not available:
-
         return MODEL_PRIORITY
 
     result = [
@@ -162,7 +160,6 @@ def send_gemini_message(prompt):
             )
 
             if text:
-
                 return text.strip()
 
             last_error = Exception(
@@ -179,7 +176,6 @@ def send_gemini_message(prompt):
             last_error = e
 
     if last_error:
-
         raise last_error
 
     raise Exception(
@@ -274,7 +270,6 @@ def get_active_trade(user_id):
     connection.close()
 
     if row:
-
         return dict(row)
 
     return None
@@ -334,19 +329,12 @@ def create_trade(
     """, (
 
         user_id,
-
         direction,
-
         entry,
-
         sl,
-
         tp,
-
         armed_price,
-
         "waiting_entry",
-
         datetime.now(
             timezone.utc
         ).isoformat(),
@@ -362,9 +350,7 @@ def create_trade(
     return trade_id
 
 
-def mark_entered(
-    trade_id
-):
+def mark_entered(trade_id):
 
     connection = db_connect()
 
@@ -422,13 +408,9 @@ def close_trade(
         ).isoformat(),
 
         exit_price,
-
         result,
-
         pnl_points,
-
         pnl_percent,
-
         trade_id,
 
     ))
@@ -438,9 +420,7 @@ def close_trade(
     connection.close()
 
 
-def cancel_trade(
-    trade_id
-):
+def cancel_trade(trade_id):
 
     connection = db_connect()
 
@@ -468,9 +448,7 @@ def cancel_trade(
     connection.close()
 
 
-def cancel_user_active_trade(
-    user_id
-):
+def cancel_user_active_trade(user_id):
 
     connection = db_connect()
 
@@ -757,7 +735,6 @@ def get_latest_m1():
     )
 
     if not values:
-
         return None
 
     candle = values[0]
@@ -786,9 +763,7 @@ def get_latest_m1():
 # FORMAT CANDLES
 # =========================================================
 
-def format_candles(
-    candles
-):
+def format_candles(candles):
 
     result = []
 
@@ -914,9 +889,7 @@ def restart_keyboard():
     ])
 
 
-def active_trade_keyboard(
-    trade_id
-):
+def active_trade_keyboard(trade_id):
 
     return InlineKeyboardMarkup([
 
@@ -934,9 +907,7 @@ def active_trade_keyboard(
 # EXTRACT GEMINI TRADE
 # =========================================================
 
-def extract_trade_from_gemini(
-    text
-):
+def extract_trade_from_gemini(text):
 
     upper = text.upper()
 
@@ -1027,6 +998,7 @@ def extract_trade_from_gemini(
     )
 
     # BUY
+
     if direction == "BUY":
 
         if not (
@@ -1036,6 +1008,7 @@ def extract_trade_from_gemini(
             return None
 
     # SELL
+
     elif direction == "SELL":
 
         if not (
@@ -1072,6 +1045,7 @@ def build_gold_prompt(
 ):
 
     return f"""
+
 أنت محلل فني للذهب XAU/USD.
 
 حلل بنفسك بيانات الشموع الخام.
@@ -1086,6 +1060,7 @@ M1 - آخر 6 ساعات:
 {m1}
 
 حلل:
+
 - اتجاه M5
 - اتجاه M1
 - Market Structure
@@ -1131,6 +1106,7 @@ M1 - آخر 6 ساعات:
 - لا تضمن الربح.
 - لا تكرر الشموع.
 - اجعل الرد أقل من 2000 حرف.
+
 """
 
 
@@ -1144,13 +1120,11 @@ async def run_auto_analysis(
 ):
 
     if user_id not in autopilot_users:
-
         return
 
     async with analysis_lock:
 
         if user_id not in autopilot_users:
-
             return
 
         existing = get_active_trade(
@@ -1158,7 +1132,6 @@ async def run_auto_analysis(
         )
 
         if existing:
-
             return
 
         try:
@@ -1217,11 +1190,6 @@ async def run_auto_analysis(
                     reply_markup=stop_keyboard()
                 )
 
-                schedule_wait_analysis(
-                    application,
-                    user_id
-                )
-
                 return
 
             # =============================================
@@ -1268,8 +1236,9 @@ async def run_auto_analysis(
                 + f"💵 السعر وقت التوصية: "
                 f"{armed_price}"
                 + "\n"
-                + "⚠️ عند وصول السعر إلى Entry "
-                  "سيتم اعتبار الصفقة داخلة."
+                + "⚠️ لن أعتبر الصفقة داخلة "
+                  "إلا عند عبور مستوى Entry "
+                  "المحدد في هذه التوصية."
             )
 
             await application.bot.send_message(
@@ -1355,6 +1324,8 @@ async def monitor_trades(
         "TRADE MONITOR STARTED"
     )
 
+    last_m1_time = None
+
     last_price = None
 
     while True:
@@ -1362,10 +1333,6 @@ async def monitor_trades(
         try:
 
             trades = get_all_active_trades()
-
-            # =============================================
-            # لا توجد صفقات
-            # =============================================
 
             if not trades:
 
@@ -1375,15 +1342,7 @@ async def monitor_trades(
 
                 continue
 
-            # =============================================
-            # السعر الحالي
-            # =============================================
-
             current_price = get_gold_price()
-
-            # =============================================
-            # آخر شمعة M1
-            # =============================================
 
             candle = None
 
@@ -1398,10 +1357,6 @@ async def monitor_trades(
                     e
                 )
 
-            # =============================================
-            # فحص كل صفقة
-            # =============================================
-
             for trade in trades:
 
                 trade_id = trade["id"]
@@ -1409,7 +1364,6 @@ async def monitor_trades(
                 user_id = trade["user_id"]
 
                 if user_id not in autopilot_users:
-
                     continue
 
                 direction = trade["direction"]
@@ -1426,6 +1380,10 @@ async def monitor_trades(
                     trade["take_profit"]
                 )
 
+                armed_price = float(
+                    trade["armed_price"]
+                )
+
                 status = trade["status"]
 
                 # =========================================
@@ -1437,34 +1395,46 @@ async def monitor_trades(
                     entered = False
 
                     # =====================================
-                    # التعديل المطلوب:
+                    # BUY
                     #
-                    # BUY:
-                    # إذا السعر الحالي وصل Entry أو نزل
-                    # تحته => دخول.
-                    #
-                    # SELL:
-                    # إذا السعر الحالي وصل Entry أو صعد
-                    # فوقه => دخول.
-                    #
-                    # لا يوجد أي شرط على السعر السابق.
+                    # يدخل عند لمس Entry من الأسفل.
+                    # لا يعتمد على armed_price.
                     # =====================================
 
                     if direction == "BUY":
 
-                        if current_price <= entry:
+                        if (
+                            last_price is not None
+                            and last_price < entry
+                            and current_price >= entry
+                        ):
 
                             entered = True
+
+                        elif current_price == entry:
+
+                            entered = True
+
+                    # =====================================
+                    # SELL
+                    #
+                    # يدخل عند لمس Entry من الأعلى.
+                    # لا يعتمد على armed_price.
+                    # =====================================
 
                     elif direction == "SELL":
 
-                        if current_price >= entry:
+                        if (
+                            last_price is not None
+                            and last_price > entry
+                            and current_price <= entry
+                        ):
 
                             entered = True
 
-                    # =====================================
-                    # ENTER TRADE
-                    # =====================================
+                        elif current_price == entry:
+
+                            entered = True
 
                     if entered:
 
@@ -1517,27 +1487,23 @@ async def monitor_trades(
                     hit_sl = False
 
                     # =====================================
-                    # فحص السعر الحالي
+                    # فحص السعر
                     # =====================================
 
                     if direction == "BUY":
 
                         if current_price >= tp:
-
                             hit_tp = True
 
                         elif current_price <= sl:
-
                             hit_sl = True
 
                     elif direction == "SELL":
 
                         if current_price <= tp:
-
                             hit_tp = True
 
                         elif current_price >= sl:
-
                             hit_sl = True
 
                     # =====================================
@@ -1553,25 +1519,21 @@ async def monitor_trades(
                         if direction == "BUY":
 
                             if high >= tp:
-
                                 hit_tp = True
 
                             if low <= sl:
-
                                 hit_sl = True
 
                         elif direction == "SELL":
 
                             if low <= tp:
-
                                 hit_tp = True
 
                             if high >= sl:
-
                                 hit_sl = True
 
                     # =====================================
-                    # TP و SL في نفس الشمعة
+                    # TP و SL في نفس شمعة M1
                     # =====================================
 
                     if hit_tp and hit_sl:
@@ -1728,6 +1690,9 @@ async def monitor_trades(
 
             last_price = current_price
 
+            if candle:
+                last_m1_time = candle["time"]
+
         except Exception as e:
 
             print(
@@ -1756,13 +1721,11 @@ async def wait_reanalysis_loop(
         )
 
         if user_id not in autopilot_users:
-
             return
 
         if get_active_trade(
             user_id
         ):
-
             return
 
         await run_auto_analysis(
@@ -1792,7 +1755,6 @@ def schedule_wait_analysis(
     )
 
     if old_task:
-
         old_task.cancel()
 
     task = asyncio.create_task(
@@ -1963,6 +1925,7 @@ async def show_m5_analysis(
         )
 
         prompt = f"""
+
 حلل XAU/USD على M5.
 
 السعر:
@@ -2032,6 +1995,7 @@ async def show_m1_analysis(
         )
 
         prompt = f"""
+
 حلل XAU/USD على M1.
 
 السعر:
@@ -2113,7 +2077,6 @@ async def button_handler(
         )
 
         if old_task:
-
             old_task.cancel()
 
         await query.edit_message_text(
@@ -2141,7 +2104,6 @@ async def button_handler(
         )
 
         if old_task:
-
             old_task.cancel()
 
         existing = get_active_trade(
@@ -2216,7 +2178,6 @@ async def button_handler(
         )
 
         if old_task:
-
             old_task.cancel()
 
         await query.edit_message_text(
