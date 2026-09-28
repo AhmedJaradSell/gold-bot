@@ -66,20 +66,17 @@ client = genai.Client(
 )
 
 MODEL_PRIORITY = [
-    "gemini-3.5-flash",
-    "gemini-3.6-flash",
-    "gemini-3.7-flash",
-    "gemini-3.8-flash",
-    "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.1-flash-lite",
     "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
 ]
 
 
 def get_available_models():
 
     try:
+
         models = client.models.list()
 
         result = []
@@ -122,6 +119,7 @@ def build_model_list():
     available = get_available_models()
 
     if not available:
+
         return MODEL_PRIORITY
 
     result = [
@@ -160,6 +158,7 @@ def send_gemini_message(prompt):
             )
 
             if text:
+
                 return text.strip()
 
             last_error = Exception(
@@ -176,6 +175,7 @@ def send_gemini_message(prompt):
             last_error = e
 
     if last_error:
+
         raise last_error
 
     raise Exception(
@@ -270,6 +270,7 @@ def get_active_trade(user_id):
     connection.close()
 
     if row:
+
         return dict(row)
 
     return None
@@ -709,6 +710,7 @@ def get_latest_m1():
 
         "apikey":
             TWELVE_DATA_API_KEY
+
     }
 
     response = requests.get(
@@ -735,6 +737,7 @@ def get_latest_m1():
     )
 
     if not values:
+
         return None
 
     candle = values[0]
@@ -997,8 +1000,6 @@ def extract_trade_from_gemini(text):
         tp_match.group(1)
     )
 
-    # BUY
-
     if direction == "BUY":
 
         if not (
@@ -1006,8 +1007,6 @@ def extract_trade_from_gemini(text):
         ):
 
             return None
-
-    # SELL
 
     elif direction == "SELL":
 
@@ -1169,10 +1168,6 @@ async def run_auto_analysis(
                 result
             )
 
-            # =============================================
-            # إرسال WAIT
-            # =============================================
-
             if trade is None:
 
                 await application.bot.send_message(
@@ -1192,15 +1187,7 @@ async def run_auto_analysis(
 
                 return
 
-            # =============================================
-            # سعر التسليح
-            # =============================================
-
             armed_price = get_gold_price()
-
-            # =============================================
-            # حفظ الصفقة
-            # =============================================
 
             trade_id = create_trade(
 
@@ -1221,10 +1208,6 @@ async def run_auto_analysis(
                 armed_price=
                     armed_price
             )
-
-            # =============================================
-            # إرسال التوصية
-            # =============================================
 
             message = (
                 result
@@ -1394,13 +1377,6 @@ async def monitor_trades(
 
                     entered = False
 
-                    # =====================================
-                    # BUY
-                    #
-                    # يدخل عند لمس Entry من الأسفل.
-                    # لا يعتمد على armed_price.
-                    # =====================================
-
                     if direction == "BUY":
 
                         if (
@@ -1414,13 +1390,6 @@ async def monitor_trades(
                         elif current_price == entry:
 
                             entered = True
-
-                    # =====================================
-                    # SELL
-                    #
-                    # يدخل عند لمس Entry من الأعلى.
-                    # لا يعتمد على armed_price.
-                    # =====================================
 
                     elif direction == "SELL":
 
@@ -1486,10 +1455,6 @@ async def monitor_trades(
 
                     hit_sl = False
 
-                    # =====================================
-                    # فحص السعر
-                    # =====================================
-
                     if direction == "BUY":
 
                         if current_price >= tp:
@@ -1505,10 +1470,6 @@ async def monitor_trades(
 
                         elif current_price >= sl:
                             hit_sl = True
-
-                    # =====================================
-                    # فحص High / Low لشمعة M1
-                    # =====================================
 
                     if candle:
 
@@ -1532,10 +1493,6 @@ async def monitor_trades(
                             if high >= sl:
                                 hit_sl = True
 
-                    # =====================================
-                    # TP و SL في نفس شمعة M1
-                    # =====================================
-
                     if hit_tp and hit_sl:
 
                         distance_tp = abs(
@@ -1553,10 +1510,6 @@ async def monitor_trades(
                         else:
 
                             hit_tp = False
-
-                    # =====================================
-                    # TAKE PROFIT
-                    # =====================================
 
                     if hit_tp:
 
@@ -1620,10 +1573,6 @@ async def monitor_trades(
                                     user_id
                                 )
                             )
-
-                    # =====================================
-                    # STOP LOSS
-                    # =====================================
 
                     elif hit_sl:
 
@@ -1691,6 +1640,7 @@ async def monitor_trades(
             last_price = current_price
 
             if candle:
+
                 last_m1_time = candle["time"]
 
         except Exception as e:
@@ -1755,6 +1705,7 @@ def schedule_wait_analysis(
     )
 
     if old_task:
+
         old_task.cancel()
 
     task = asyncio.create_task(
@@ -2077,6 +2028,7 @@ async def button_handler(
         )
 
         if old_task:
+
             old_task.cancel()
 
         await query.edit_message_text(
@@ -2104,6 +2056,7 @@ async def button_handler(
         )
 
         if old_task:
+
             old_task.cancel()
 
         existing = get_active_trade(
@@ -2178,6 +2131,7 @@ async def button_handler(
         )
 
         if old_task:
+
             old_task.cancel()
 
         await query.edit_message_text(
@@ -2301,8 +2255,6 @@ def main():
 
     )
 
-    # Commands
-
     application.add_handler(
         CommandHandler(
             "start",
@@ -2317,15 +2269,11 @@ def main():
         )
     )
 
-    # Buttons
-
     application.add_handler(
         CallbackQueryHandler(
             button_handler
         )
     )
-
-    # Chat
 
     application.add_handler(
         MessageHandler(
