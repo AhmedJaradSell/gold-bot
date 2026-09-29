@@ -50,13 +50,10 @@ if not TWELVE_DATA_API_KEY:
 
 SYMBOL = "XAU/USD"
 
-# فحص المتابعة كل 15 ثانية
 MONITOR_SECONDS = 15
 
-# إذا لم توجد فرصة WAIT يعيد التحليل بعد 5 دقائق
 WAIT_REANALYZE_SECONDS = 300
 
-# منع أكثر من تحليل في نفس الوقت
 analysis_lock = asyncio.Lock()
 
 
@@ -83,7 +80,6 @@ MODEL_PRIORITY = [
 def get_available_models():
 
     try:
-
         models = client.models.list()
 
         result = []
@@ -126,7 +122,6 @@ def build_model_list():
     available = get_available_models()
 
     if not available:
-
         return MODEL_PRIORITY
 
     result = [
@@ -165,7 +160,6 @@ def send_gemini_message(prompt):
             )
 
             if text:
-
                 return text.strip()
 
             last_error = Exception(
@@ -182,7 +176,6 @@ def send_gemini_message(prompt):
             last_error = e
 
     if last_error:
-
         raise last_error
 
     raise Exception(
@@ -277,7 +270,6 @@ def get_active_trade(user_id):
     connection.close()
 
     if row:
-
         return dict(row)
 
     return None
@@ -358,9 +350,7 @@ def create_trade(
     return trade_id
 
 
-def mark_entered(
-    trade_id
-):
+def mark_entered(trade_id):
 
     connection = db_connect()
 
@@ -430,9 +420,7 @@ def close_trade(
     connection.close()
 
 
-def cancel_trade(
-    trade_id
-):
+def cancel_trade(trade_id):
 
     connection = db_connect()
 
@@ -460,9 +448,7 @@ def cancel_trade(
     connection.close()
 
 
-def cancel_user_active_trade(
-    user_id
-):
+def cancel_user_active_trade(user_id):
 
     connection = db_connect()
 
@@ -749,7 +735,6 @@ def get_latest_m1():
     )
 
     if not values:
-
         return None
 
     candle = values[0]
@@ -778,9 +763,7 @@ def get_latest_m1():
 # FORMAT CANDLES
 # =========================================================
 
-def format_candles(
-    candles
-):
+def format_candles(candles):
 
     result = []
 
@@ -906,9 +889,7 @@ def restart_keyboard():
     ])
 
 
-def active_trade_keyboard(
-    trade_id
-):
+def active_trade_keyboard(trade_id):
 
     return InlineKeyboardMarkup([
 
@@ -926,9 +907,7 @@ def active_trade_keyboard(
 # EXTRACT GEMINI TRADE
 # =========================================================
 
-def extract_trade_from_gemini(
-    text
-):
+def extract_trade_from_gemini(text):
 
     upper = text.upper()
 
@@ -1019,6 +998,7 @@ def extract_trade_from_gemini(
     )
 
     # BUY
+
     if direction == "BUY":
 
         if not (
@@ -1028,6 +1008,7 @@ def extract_trade_from_gemini(
             return None
 
     # SELL
+
     elif direction == "SELL":
 
         if not (
@@ -1064,6 +1045,7 @@ def build_gold_prompt(
 ):
 
     return f"""
+
 أنت محلل فني للذهب XAU/USD.
 
 حلل بنفسك بيانات الشموع الخام.
@@ -1078,6 +1060,7 @@ M1 - آخر 6 ساعات:
 {m1}
 
 حلل:
+
 - اتجاه M5
 - اتجاه M1
 - Market Structure
@@ -1123,6 +1106,7 @@ M1 - آخر 6 ساعات:
 - لا تضمن الربح.
 - لا تكرر الشموع.
 - اجعل الرد أقل من 2000 حرف.
+
 """
 
 
@@ -1136,13 +1120,11 @@ async def run_auto_analysis(
 ):
 
     if user_id not in autopilot_users:
-
         return
 
     async with analysis_lock:
 
         if user_id not in autopilot_users:
-
             return
 
         existing = get_active_trade(
@@ -1150,7 +1132,6 @@ async def run_auto_analysis(
         )
 
         if existing:
-
             return
 
         try:
@@ -1189,7 +1170,7 @@ async def run_auto_analysis(
             )
 
             # =============================================
-            # إرسال التوصية أولًا
+            # إرسال WAIT
             # =============================================
 
             if trade is None:
@@ -1218,7 +1199,7 @@ async def run_auto_analysis(
             armed_price = get_gold_price()
 
             # =============================================
-            # حفظ الصفقة بعد إرسال التوصية
+            # حفظ الصفقة
             # =============================================
 
             trade_id = create_trade(
@@ -1353,10 +1334,6 @@ async def monitor_trades(
 
             trades = get_all_active_trades()
 
-            # =============================================
-            # إذا لا توجد صفقات
-            # =============================================
-
             if not trades:
 
                 await asyncio.sleep(
@@ -1365,15 +1342,7 @@ async def monitor_trades(
 
                 continue
 
-            # =============================================
-            # السعر اللحظي
-            # =============================================
-
             current_price = get_gold_price()
-
-            # =============================================
-            # آخر شمعة M1
-            # =============================================
 
             candle = None
 
@@ -1388,19 +1357,13 @@ async def monitor_trades(
                     e
                 )
 
-            # =============================================
-            # فحص كل صفقة
-            # =============================================
-
             for trade in trades:
 
                 trade_id = trade["id"]
 
                 user_id = trade["user_id"]
 
-                # إذا المستخدم أوقف النظام
                 if user_id not in autopilot_users:
-
                     continue
 
                 direction = trade["direction"]
@@ -1431,24 +1394,37 @@ async def monitor_trades(
 
                     entered = False
 
-                    # BUY:
+                    # =====================================
+                    # BUY
                     #
-                    # لا ندخل إذا السعر كان أصلًا تحت Entry
-                    # عند إنشاء التوصية.
-                    #
-                    # يجب أن يكون السعر فوق Entry ثم
-                    # يهبط ويلمس Entry.
+                    # يدخل عند لمس Entry من الأسفل.
+                    # لا يعتمد على armed_price.
+                    # =====================================
 
                     if direction == "BUY":
 
                         if (
-                            armed_price > entry
-                            and current_price <= entry
+                            last_price is not None
+                            and last_price < entry
+                            and current_price >= entry
                         ):
 
                             entered = True
 
-                        elif (
+                        elif current_price == entry:
+
+                            entered = True
+
+                    # =====================================
+                    # SELL
+                    #
+                    # يدخل عند لمس Entry من الأعلى.
+                    # لا يعتمد على armed_price.
+                    # =====================================
+
+                    elif direction == "SELL":
+
+                        if (
                             last_price is not None
                             and last_price > entry
                             and current_price <= entry
@@ -1456,25 +1432,7 @@ async def monitor_trades(
 
                             entered = True
 
-                    # SELL:
-                    #
-                    # يجب أن يكون السعر تحت Entry ثم
-                    # يصعد ويلمس Entry.
-
-                    elif direction == "SELL":
-
-                        if (
-                            armed_price < entry
-                            and current_price >= entry
-                        ):
-
-                            entered = True
-
-                        elif (
-                            last_price is not None
-                            and last_price < entry
-                            and current_price >= entry
-                        ):
+                        elif current_price == entry:
 
                             entered = True
 
@@ -1535,21 +1493,17 @@ async def monitor_trades(
                     if direction == "BUY":
 
                         if current_price >= tp:
-
                             hit_tp = True
 
                         elif current_price <= sl:
-
                             hit_sl = True
 
                     elif direction == "SELL":
 
                         if current_price <= tp:
-
                             hit_tp = True
 
                         elif current_price >= sl:
-
                             hit_sl = True
 
                     # =====================================
@@ -1565,34 +1519,24 @@ async def monitor_trades(
                         if direction == "BUY":
 
                             if high >= tp:
-
                                 hit_tp = True
 
                             if low <= sl:
-
                                 hit_sl = True
 
                         elif direction == "SELL":
 
                             if low <= tp:
-
                                 hit_tp = True
 
                             if high >= sl:
-
                                 hit_sl = True
 
                     # =====================================
-                    # إذا تحقق TP و SL داخل نفس شمعة M1
+                    # TP و SL في نفس شمعة M1
                     # =====================================
 
                     if hit_tp and hit_sl:
-
-                        # لا يمكن معرفة أيهما لمس أولًا
-                        # من OHLC وحدها.
-                        #
-                        # نختار الحالة الأقرب للسعر الحالي
-                        # ونوضح أنها حالة ملتبسة.
 
                         distance_tp = abs(
                             current_price - tp
@@ -1666,7 +1610,6 @@ async def monitor_trades(
                             )
                         )
 
-                        # تحليل جديد بعد انتهاء الصفقة
                         if user_id in autopilot_users:
 
                             await asyncio.sleep(3)
@@ -1748,7 +1691,6 @@ async def monitor_trades(
             last_price = current_price
 
             if candle:
-
                 last_m1_time = candle["time"]
 
         except Exception as e:
@@ -1757,9 +1699,6 @@ async def monitor_trades(
                 "MONITOR LOOP ERROR:",
                 e
             )
-
-            # لا نوقف المراقب
-            # ننتظر ثم نحاول مرة أخرى
 
         await asyncio.sleep(
             MONITOR_SECONDS
@@ -1782,13 +1721,11 @@ async def wait_reanalysis_loop(
         )
 
         if user_id not in autopilot_users:
-
             return
 
         if get_active_trade(
             user_id
         ):
-
             return
 
         await run_auto_analysis(
@@ -1818,7 +1755,6 @@ def schedule_wait_analysis(
     )
 
     if old_task:
-
         old_task.cancel()
 
     task = asyncio.create_task(
@@ -1989,6 +1925,7 @@ async def show_m5_analysis(
         )
 
         prompt = f"""
+
 حلل XAU/USD على M5.
 
 السعر:
@@ -2058,6 +1995,7 @@ async def show_m1_analysis(
         )
 
         prompt = f"""
+
 حلل XAU/USD على M1.
 
 السعر:
@@ -2139,7 +2077,6 @@ async def button_handler(
         )
 
         if old_task:
-
             old_task.cancel()
 
         await query.edit_message_text(
@@ -2157,7 +2094,6 @@ async def button_handler(
 
     if data == "gemini_analysis":
 
-        # تشغيل الوضع التلقائي
         autopilot_users.add(
             user_id
         )
@@ -2168,10 +2104,8 @@ async def button_handler(
         )
 
         if old_task:
-
             old_task.cancel()
 
-        # إذا توجد صفقة بالفعل
         existing = get_active_trade(
             user_id
         )
@@ -2244,7 +2178,6 @@ async def button_handler(
         )
 
         if old_task:
-
             old_task.cancel()
 
         await query.edit_message_text(
@@ -2350,7 +2283,6 @@ def main():
 
     init_database()
 
-    # Flask
     threading.Thread(
 
         target=run_web_server,
