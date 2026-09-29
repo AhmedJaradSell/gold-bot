@@ -3,6 +3,7 @@ import re
 import asyncio
 import threading
 import sqlite3
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -50,16 +51,36 @@ if not TWELVE_DATA_API_KEY:
 
 SYMBOL = "XAU/USD"
 
-# فحص السعر كل 15 ثانية
+# الفحص الداخلي كل 15 ثانية
 MONITOR_SECONDS = 15
 
-# إعادة التحليل بعد WAIT كل 5 دقائق
+# إعادة التحليل بعد WAIT
 WAIT_REANALYZE_SECONDS = 300
 
-# إرسال تحديث السعر للمستخدم كل 5 دقائق
+# رسالة السعر للمستخدم كل 5 دقائق
 PRICE_UPDATE_SECONDS = 300
 
-# قفل تحليلات Gemini
+# =========================================================
+# TWELVE DATA RATE LIMIT SETTINGS
+# =========================================================
+
+# السعر من Twelve Data يتم تحديثه بحد أقصى مرة كل 60 ثانية
+PRICE_CACHE_SECONDS = 60
+
+# شموع M5 يتم تحديثها كل 5 دقائق
+M5_CACHE_SECONDS = 300
+
+# شموع M1 يتم تحديثها كل دقيقة
+M1_CACHE_SECONDS = 60
+
+# عند 429 نوقف طلبات Twelve Data مؤقتًا
+TWELVE_RATE_LIMIT_COOLDOWN = 120
+
+
+# =========================================================
+# GEMINI LOCK
+# =========================================================
+
 analysis_lock = asyncio.Lock()
 
 
@@ -479,288 +500,575 @@ def cancel_user_active_trade(user_id):
 # AUTO PILOT STATE
 # =========================================================
 
-# المستخدمون الذين فعلوا التحليل التلقائي
 autopilot_users = set()
 
-# مهام إعادة التحليل بعد WAIT
 user_wait_tasks = {}
 
-# آخر سعر معروف لكل مستخدم
 user_last_price = {}
 
-# آخر دقيقة أرسلنا فيها تحديث سعر لكل مستخدم
 user_last_price_update_bucket = {}
 
 
 # =========================================================
-# FLASK
+# TWELVE DATA CACHE
 # =========================================================
 
-web_app = Flask(__name__)
+price_cache = {
+    "price": None,
+    "time": 0
+}
+
+m5_cache = {
+    "data": None,
+    "time": 0
+}
+
+m1_cache = {
+    "data": None,
+    "time": 0
+}
+
+latest_m1_cache = {
+    "data": None,
+    "time": 0
+}
 
 
-@web_app.route("/")
-def home():
+# وقت انتهاء الـ cooldown
+twelve_rate_limit_until = 0
 
-    return "Gold Gemini Bot is running!"
-
-
-@web_app.route("/health")
-def health():
-
-    return {
-        "status": "ok"
-    }
+# قفل طلبات Twelve Data
+twelve_data_lock = threading.Lock()
 
 
-def run_web_server():
+# =========================================================
+# TWELVE DATA REQUEST
+# =========================================================
 
-    port = int(
-        os.environ.get(
-            "PORT",
-            10000
+def twelve_data_request(
+    endpoint,
+    params,
+    timeout=20
+):
+
+    global twelve_rate_limit_until
+
+    now = time.time()
+
+    # =====================================================
+    # إذا كنا داخل فترة منع 429
+    # =====================================================
+
+    if now < twelve_rate_limit_until:
+
+        remaining = int(
+            twelve_rate_limit_until - now
         )
+
+        raise Exception(
+            "Twelve Data Rate Limit "
+            f"- انتظر {remaining} ثانية."
+        )
+
+    try:
+
+        response = requests.get(
+            endpoint,
+            params=params,
+            timeout=timeout
+        )
+
+    except requests.RequestException as e:
+
+        raise Exception(
+            f"خطأ اتصال بـ Twelve Data: {e}"
+        )
+
+    print(
+        "TWELVE DATA HTTP:",
+        response.status_code
     )
 
-    web_app.run(
-        host="0.0.0.0",
-        port=port
-    )
+    # =====================================================
+    # 429
+    # =====================================================
+
+    if response.status_code == 429:
+
+        twelve_rate_limit_until = (
+            time.time()
+            + TWELVE_RATE_LIMIT_COOLDOWN
+        )
+
+        print(
+            "TWELVE DATA 429"
+        )
+
+        print(
+            f"Cooldown: "
+            f"{TWELVE_RATE_LIMIT_COOLDOWN} seconds"
+        )
+
+        raise Exception(
+            "Twelve Data: "
+            "تم تجاوز حد الطلبات 429."
+        )
+
+    # =====================================================
+    # HTTP ERROR
+    # =====================================================
+
+    if response.status_code != 200:
+
+        try:
+
+            error_data = response.json()
+
+            message = error_data.get(
+                "message",
+                str(error_data)
+            )
+
+        except Exception:
+
+            message = response.text[:300]
+
+        raise Exception(
+            f"Twelve Data HTTP "
+            f"{response.status_code}: "
+            f"{message}"
+        )
+
+    # =====================================================
+    # JSON
+    # =====================================================
+
+    try:
+
+        data = response.json()
+
+    except Exception:
+
+        raise Exception(
+            "Twelve Data رجّع ردًا غير صالح."
+        )
+
+    # =====================================================
+    # API ERROR
+    # =====================================================
+
+    if data.get("status") == "error":
+
+        message = data.get(
+            "message",
+            "خطأ غير معروف من Twelve Data"
+        )
+
+        raise Exception(
+            f"Twelve Data: {message}"
+        )
+
+    return data
 
 
 # =========================================================
 # GOLD PRICE
 # =========================================================
 
-def get_gold_price():
+def get_gold_price(
+    force=False
+):
 
-    url = (
-        "https://api.twelvedata.com/price"
-    )
+    now = time.time()
 
-    params = {
+    # =====================================================
+    # CACHE
+    # =====================================================
 
-        "symbol": SYMBOL,
+    if not force:
 
-        "apikey":
-            TWELVE_DATA_API_KEY
+        if (
+            price_cache["price"] is not None
+            and
+            now - price_cache["time"]
+            < PRICE_CACHE_SECONDS
+        ):
 
-    }
+            return price_cache["price"]
 
-    response = requests.get(
-        url,
-        params=params,
-        timeout=15
-    )
+    # =====================================================
+    # LOCK
+    # =====================================================
 
-    response.raise_for_status()
+    with twelve_data_lock:
 
-    data = response.json()
+        # إعادة فحص الـcache بعد القفل
 
-    if "price" not in data:
+        now = time.time()
 
-        raise Exception(
-            data.get(
-                "message",
-                "لم يصل سعر الذهب."
-            )
+        if not force:
+
+            if (
+                price_cache["price"] is not None
+                and
+                now - price_cache["time"]
+                < PRICE_CACHE_SECONDS
+            ):
+
+                return price_cache["price"]
+
+        url = (
+            "https://api.twelvedata.com/price"
         )
 
-    return float(
-        data["price"]
-    )
+        params = {
+
+            "symbol": SYMBOL,
+
+            "apikey":
+                TWELVE_DATA_API_KEY
+
+        }
+
+        data = twelve_data_request(
+
+            url,
+
+            params,
+
+            timeout=15
+        )
+
+        if "price" not in data:
+
+            raise Exception(
+                data.get(
+                    "message",
+                    "لم يصل سعر الذهب."
+                )
+            )
+
+        price = float(
+            data["price"]
+        )
+
+        price_cache["price"] = price
+
+        price_cache["time"] = time.time()
+
+        print(
+            f"Twelve Data PRICE: {price}"
+        )
+
+        return price
 
 
 # =========================================================
 # M5
 # =========================================================
 
-def get_gold_m5():
+def get_gold_m5(
+    force=False
+):
 
-    url = (
-        "https://api.twelvedata.com/time_series"
-    )
+    now = time.time()
 
-    params = {
+    # =====================================================
+    # CACHE
+    # =====================================================
 
-        "symbol": SYMBOL,
+    if not force:
 
-        "interval": "5min",
+        if (
+            m5_cache["data"] is not None
+            and
+            now - m5_cache["time"]
+            < M5_CACHE_SECONDS
+        ):
 
-        "outputsize": 288,
-
-        "order": "asc",
-
-        "timezone": "UTC",
-
-        "apikey":
-            TWELVE_DATA_API_KEY
-    }
-
-    response = requests.get(
-        url,
-        params=params,
-        timeout=30
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    if data.get("status") == "error":
-
-        raise Exception(
-            data.get(
-                "message",
-                "خطأ Twelve Data"
+            print(
+                "M5 CACHE USED"
             )
+
+            return m5_cache["data"]
+
+    # =====================================================
+    # LOCK
+    # =====================================================
+
+    with twelve_data_lock:
+
+        now = time.time()
+
+        if not force:
+
+            if (
+                m5_cache["data"] is not None
+                and
+                now - m5_cache["time"]
+                < M5_CACHE_SECONDS
+            ):
+
+                return m5_cache["data"]
+
+        url = (
+            "https://api.twelvedata.com/time_series"
         )
 
-    values = data.get(
-        "values"
-    )
+        params = {
 
-    if not values:
+            "symbol": SYMBOL,
 
-        raise Exception(
-            "لم تصل شموع M5."
+            "interval": "5min",
+
+            "outputsize": 288,
+
+            "order": "asc",
+
+            "timezone": "UTC",
+
+            "apikey":
+                TWELVE_DATA_API_KEY
+
+        }
+
+        data = twelve_data_request(
+
+            url,
+
+            params,
+
+            timeout=30
         )
 
-    return values
+        values = data.get(
+            "values"
+        )
+
+        if not values:
+
+            raise Exception(
+                "لم تصل شموع M5."
+            )
+
+        m5_cache["data"] = values
+
+        m5_cache["time"] = time.time()
+
+        print(
+            "Twelve Data M5 UPDATED"
+        )
+
+        return values
 
 
 # =========================================================
 # M1
 # =========================================================
 
-def get_gold_m1():
+def get_gold_m1(
+    force=False
+):
 
-    url = (
-        "https://api.twelvedata.com/time_series"
-    )
+    now = time.time()
 
-    params = {
+    # =====================================================
+    # CACHE
+    # =====================================================
 
-        "symbol": SYMBOL,
+    if not force:
 
-        "interval": "1min",
+        if (
+            m1_cache["data"] is not None
+            and
+            now - m1_cache["time"]
+            < M1_CACHE_SECONDS
+        ):
 
-        "outputsize": 360,
-
-        "order": "asc",
-
-        "timezone": "UTC",
-
-        "apikey":
-            TWELVE_DATA_API_KEY
-    }
-
-    response = requests.get(
-        url,
-        params=params,
-        timeout=30
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    if data.get("status") == "error":
-
-        raise Exception(
-            data.get(
-                "message",
-                "خطأ Twelve Data"
+            print(
+                "M1 CACHE USED"
             )
+
+            return m1_cache["data"]
+
+    # =====================================================
+    # LOCK
+    # =====================================================
+
+    with twelve_data_lock:
+
+        now = time.time()
+
+        if not force:
+
+            if (
+                m1_cache["data"] is not None
+                and
+                now - m1_cache["time"]
+                < M1_CACHE_SECONDS
+            ):
+
+                return m1_cache["data"]
+
+        url = (
+            "https://api.twelvedata.com/time_series"
         )
 
-    values = data.get(
-        "values"
-    )
+        params = {
 
-    if not values:
+            "symbol": SYMBOL,
 
-        raise Exception(
-            "لم تصل شموع M1."
+            "interval": "1min",
+
+            "outputsize": 360,
+
+            "order": "asc",
+
+            "timezone": "UTC",
+
+            "apikey":
+                TWELVE_DATA_API_KEY
+
+        }
+
+        data = twelve_data_request(
+
+            url,
+
+            params,
+
+            timeout=30
         )
 
-    return values
+        values = data.get(
+            "values"
+        )
+
+        if not values:
+
+            raise Exception(
+                "لم تصل شموع M1."
+            )
+
+        m1_cache["data"] = values
+
+        m1_cache["time"] = time.time()
+
+        print(
+            "Twelve Data M1 UPDATED"
+        )
+
+        return values
 
 
 # =========================================================
 # LATEST M1
 # =========================================================
 
-def get_latest_m1():
+def get_latest_m1(
+    force=False
+):
 
-    url = (
-        "https://api.twelvedata.com/time_series"
-    )
+    now = time.time()
 
-    params = {
+    # =====================================================
+    # CACHE
+    # =====================================================
 
-        "symbol": SYMBOL,
+    if not force:
 
-        "interval": "1min",
+        if (
+            latest_m1_cache["data"] is not None
+            and
+            now - latest_m1_cache["time"]
+            < M1_CACHE_SECONDS
+        ):
 
-        "outputsize": 1,
+            return latest_m1_cache["data"]
 
-        "order": "desc",
+    # =====================================================
+    # LOCK
+    # =====================================================
 
-        "timezone": "UTC",
+    with twelve_data_lock:
 
-        "apikey":
-            TWELVE_DATA_API_KEY
+        now = time.time()
 
-    }
+        if not force:
 
-    response = requests.get(
-        url,
-        params=params,
-        timeout=20
-    )
+            if (
+                latest_m1_cache["data"] is not None
+                and
+                now - latest_m1_cache["time"]
+                < M1_CACHE_SECONDS
+            ):
 
-    response.raise_for_status()
+                return latest_m1_cache["data"]
 
-    data = response.json()
-
-    if data.get("status") == "error":
-
-        raise Exception(
-            data.get(
-                "message",
-                "خطأ Twelve Data"
-            )
+        url = (
+            "https://api.twelvedata.com/time_series"
         )
 
-    values = data.get(
-        "values"
-    )
+        params = {
 
-    if not values:
+            "symbol": SYMBOL,
 
-        return None
+            "interval": "1min",
 
-    candle = values[0]
+            "outputsize": 1,
 
-    return {
+            "order": "desc",
 
-        "time":
-            candle.get("datetime"),
+            "timezone": "UTC",
 
-        "open":
-            float(candle.get("open")),
+            "apikey":
+                TWELVE_DATA_API_KEY
 
-        "high":
-            float(candle.get("high")),
+        }
 
-        "low":
-            float(candle.get("low")),
+        data = twelve_data_request(
 
-        "close":
-            float(candle.get("close")),
+            url,
 
-    }
+            params,
+
+            timeout=20
+        )
+
+        values = data.get(
+            "values"
+        )
+
+        if not values:
+
+            return None
+
+        candle = values[0]
+
+        result = {
+
+            "time":
+                candle.get("datetime"),
+
+            "open":
+                float(candle.get("open")),
+
+            "high":
+                float(candle.get("high")),
+
+            "low":
+                float(candle.get("low")),
+
+            "close":
+                float(candle.get("close")),
+
+        }
+
+        latest_m1_cache["data"] = result
+
+        latest_m1_cache["time"] = time.time()
+
+        return result
 
 
 # =========================================================
@@ -1220,7 +1528,6 @@ def get_price_update_bucket():
         timezone.utc
     )
 
-    # نحول الوقت إلى رقم bucket كل 5 دقائق
     total_minutes = (
         now.hour * 60
         + now.minute
@@ -1336,7 +1643,7 @@ async def send_five_minute_price_update(
 
 
 # =========================================================
-# SEND AUTOMATIC ANALYSIS
+# AUTO ANALYSIS
 # =========================================================
 
 async def run_auto_analysis(
@@ -1379,13 +1686,25 @@ async def run_auto_analysis(
                 )
             )
 
+            # =============================================
+            # طلب السعر مرة واحدة فقط
+            # =============================================
+
             price = await asyncio.to_thread(
                 get_gold_price
             )
 
+            # =============================================
+            # M5
+            # =============================================
+
             m5_raw = await asyncio.to_thread(
                 get_gold_m5
             )
+
+            # =============================================
+            # M1
+            # =============================================
 
             m1_raw = await asyncio.to_thread(
                 get_gold_m1
@@ -1435,8 +1754,6 @@ async def run_auto_analysis(
                     reply_markup=stop_keyboard()
                 )
 
-                # مهم جدًا:
-                # هنا يتم فعليًا جدولة إعادة التحليل
                 schedule_wait_analysis(
                     application,
                     user_id
@@ -1448,8 +1765,6 @@ async def run_auto_analysis(
             # CREATE TRADE
             # =================================================
 
-            # نتأكد مرة ثانية أنه لا توجد صفقة
-            # أثناء انتظار Gemini
             existing = get_active_trade(
                 user_id
             )
@@ -1462,9 +1777,13 @@ async def run_auto_analysis(
 
                 return
 
-            armed_price = await asyncio.to_thread(
-                get_gold_price
-            )
+            # =================================================
+            # مهم:
+            # نستخدم نفس السعر الذي جلبناه في بداية التحليل
+            # بدل طلب Twelve Data مرة ثانية
+            # =================================================
+
+            armed_price = price
 
             trade_id = create_trade(
 
@@ -1486,17 +1805,14 @@ async def run_auto_analysis(
                     armed_price
             )
 
-            # نلغي أي مؤقت WAIT قديم
             cancel_wait_analysis(
                 user_id
             )
 
-            # نضبط آخر سعر للمستخدم
             user_last_price[
                 user_id
             ] = armed_price
 
-            # نسمح بتحديث 5 دقائق جديد
             user_last_price_update_bucket.pop(
                 user_id,
                 None
@@ -1558,6 +1874,7 @@ async def run_auto_analysis(
 
                     text=(
                         "⚠️ حصل خطأ مؤقت أثناء التحليل.\n\n"
+                        f"التفاصيل: {str(e)[:300]}\n\n"
                         "🔄 سأحاول التحليل مرة أخرى بعد 5 دقائق."
                     ),
 
@@ -1633,17 +1950,35 @@ async def monitor_trades(
 
                 continue
 
-            # =============================================
-            # الحصول على السعر الحالي مرة واحدة
-            # =============================================
+            # =================================================
+            # السعر الحالي
+            #
+            # get_gold_price يستخدم CACHE
+            # لذلك لن يضرب Twelve Data كل 15 ثانية
+            # =================================================
 
-            current_price = await asyncio.to_thread(
-                get_gold_price
-            )
+            try:
 
-            # =============================================
+                current_price = await asyncio.to_thread(
+                    get_gold_price
+                )
+
+            except Exception as e:
+
+                print(
+                    "MONITOR PRICE ERROR:",
+                    e
+                )
+
+                await asyncio.sleep(
+                    MONITOR_SECONDS
+                )
+
+                continue
+
+            # =================================================
             # M1 الحالي
-            # =============================================
+            # =================================================
 
             candle = None
 
@@ -1660,9 +1995,9 @@ async def monitor_trades(
                     e
                 )
 
-            # =============================================
+            # =================================================
             # معالجة كل مستخدم
-            # =============================================
+            # =================================================
 
             for trade in trades:
 
@@ -1690,9 +2025,9 @@ async def monitor_trades(
 
                 status = trade["status"]
 
-                # =========================================
-                # السعر السابق لهذا المستخدم فقط
-                # =========================================
+                # =================================================
+                # السعر السابق
+                # =================================================
 
                 previous_price = (
                     user_last_price.get(
@@ -1700,9 +2035,9 @@ async def monitor_trades(
                     )
                 )
 
-                # =========================================
-                # تحديث السعر كل 5 دقائق
-                # =========================================
+                # =================================================
+                # تحديث كل 5 دقائق
+                # =================================================
 
                 await send_five_minute_price_update(
 
@@ -1715,24 +2050,26 @@ async def monitor_trades(
                     trade
                 )
 
-                # =========================================
+                # =================================================
                 # WAITING ENTRY
-                # =========================================
+                # =================================================
 
                 if status == "waiting_entry":
 
                     entered = False
 
-                    # -----------------------------
+                    # =================================================
                     # BUY
-                    # -----------------------------
+                    # =================================================
 
                     if direction == "BUY":
 
                         if (
                             previous_price is not None
-                            and previous_price < entry
-                            and current_price >= entry
+                            and
+                            previous_price < entry
+                            and
+                            current_price >= entry
                         ):
 
                             entered = True
@@ -1741,16 +2078,18 @@ async def monitor_trades(
 
                             entered = True
 
-                    # -----------------------------
+                    # =================================================
                     # SELL
-                    # -----------------------------
+                    # =================================================
 
                     elif direction == "SELL":
 
                         if (
                             previous_price is not None
-                            and previous_price > entry
-                            and current_price <= entry
+                            and
+                            previous_price > entry
+                            and
+                            current_price <= entry
                         ):
 
                             entered = True
@@ -1759,19 +2098,14 @@ async def monitor_trades(
 
                             entered = True
 
-                    # =================================
+                    # =================================================
                     # ENTRY HIT
-                    # =================================
+                    # =================================================
 
                     if entered:
 
                         mark_entered(
                             trade_id
-                        )
-
-                        # إعادة جلب الصفقة
-                        updated_trade = get_active_trade(
-                            user_id
                         )
 
                         await application.bot.send_message(
@@ -1808,12 +2142,11 @@ async def monitor_trades(
                                 )
                         )
 
-                        # لا نفحص SL/TP في نفس الدورة
                         continue
 
-                # =========================================
+                # =================================================
                 # IN TRADE
-                # =========================================
+                # =================================================
 
                 if status == "in_trade":
 
@@ -1821,9 +2154,9 @@ async def monitor_trades(
 
                     hit_sl = False
 
-                    # -------------------------------------
+                    # =================================================
                     # السعر الحالي
-                    # -------------------------------------
+                    # =================================================
 
                     if direction == "BUY":
 
@@ -1845,9 +2178,9 @@ async def monitor_trades(
 
                             hit_sl = True
 
-                    # -------------------------------------
-                    # High / Low لآخر شمعة M1
-                    # -------------------------------------
+                    # =================================================
+                    # High / Low لآخر M1
+                    # =================================================
 
                     if candle:
 
@@ -1875,10 +2208,9 @@ async def monitor_trades(
 
                                 hit_sl = True
 
-                    # -------------------------------------
-                    # إذا ضرب الاثنين داخل نفس الشمعة
-                    # نحتاج اختيار واحد
-                    # -------------------------------------
+                    # =================================================
+                    # إذا الاثنين انضربوا في نفس الدورة
+                    # =================================================
 
                     if hit_tp and hit_sl:
 
@@ -1898,9 +2230,9 @@ async def monitor_trades(
 
                             hit_tp = False
 
-                    # =====================================
+                    # =================================================
                     # TAKE PROFIT
-                    # =====================================
+                    # =================================================
 
                     if hit_tp:
 
@@ -1956,13 +2288,11 @@ async def monitor_trades(
                             )
                         )
 
-                        # تنظيف حالة المستخدم
                         user_last_price_update_bucket.pop(
                             user_id,
                             None
                         )
 
-                        # بدء تحليل جديد
                         if user_id in autopilot_users:
 
                             await asyncio.sleep(3)
@@ -1974,9 +2304,9 @@ async def monitor_trades(
                                 )
                             )
 
-                    # =====================================
+                    # =================================================
                     # STOP LOSS
-                    # =====================================
+                    # =================================================
 
                     elif hit_sl:
 
@@ -2032,13 +2362,11 @@ async def monitor_trades(
                             )
                         )
 
-                        # تنظيف حالة المستخدم
                         user_last_price_update_bucket.pop(
                             user_id,
                             None
                         )
 
-                        # بدء تحليل جديد
                         if user_id in autopilot_users:
 
                             await asyncio.sleep(3)
@@ -2050,9 +2378,9 @@ async def monitor_trades(
                                 )
                             )
 
-                # =========================================
-                # حفظ السعر السابق لهذا المستخدم
-                # =========================================
+                # =================================================
+                # حفظ السعر السابق
+                # =================================================
 
                 user_last_price[
                     user_id
@@ -2081,22 +2409,18 @@ async def start_command(
 
     user_id = update.effective_user.id
 
-    # إيقاف الأوتوبايلوت
     autopilot_users.discard(
         user_id
     )
 
-    # إلغاء أي مؤقت WAIT
     cancel_wait_analysis(
         user_id
     )
 
-    # إلغاء أي صفقة فعالة
     cancel_user_active_trade(
         user_id
     )
 
-    # تنظيف حالة السعر
     user_last_price.pop(
         user_id,
         None
@@ -2229,14 +2553,15 @@ async def show_current_price(
 
         await query.edit_message_text(
 
-            "❌ تعذر الحصول على السعر.",
+            f"❌ تعذر الحصول على السعر.\n\n"
+            f"السبب: {str(e)[:300]}",
 
             reply_markup=main_keyboard()
         )
 
 
 # =========================================================
-# M5 ANALYSIS ONLY
+# M5 ANALYSIS
 # =========================================================
 
 async def show_m5_analysis(
@@ -2314,14 +2639,15 @@ Market Structure،
 
         await query.edit_message_text(
 
-            "❌ حدث خطأ في تحليل M5.",
+            f"❌ حدث خطأ في تحليل M5.\n\n"
+            f"السبب: {str(e)[:300]}",
 
             reply_markup=main_keyboard()
         )
 
 
 # =========================================================
-# M1 ANALYSIS ONLY
+# M1 ANALYSIS
 # =========================================================
 
 async def show_m1_analysis(
@@ -2399,7 +2725,8 @@ Market Structure،
 
         await query.edit_message_text(
 
-            "❌ حدث خطأ في تحليل M1.",
+            f"❌ حدث خطأ في تحليل M1.\n\n"
+            f"السبب: {str(e)[:300]}",
 
             reply_markup=main_keyboard()
         )
@@ -2646,6 +2973,42 @@ async def post_init(
 
 
 # =========================================================
+# FLASK
+# =========================================================
+
+web_app = Flask(__name__)
+
+
+@web_app.route("/")
+def home():
+
+    return "Gold Gemini Bot is running!"
+
+
+@web_app.route("/health")
+def health():
+
+    return {
+        "status": "ok"
+    }
+
+
+def run_web_server():
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            10000
+        )
+    )
+
+    web_app.run(
+        host="0.0.0.0",
+        port=port
+    )
+
+
+# =========================================================
 # MAIN
 # =========================================================
 
@@ -2665,9 +3028,9 @@ def main():
 
     init_database()
 
-    # ---------------------------------------------
-    # Flask لـ Render
-    # ---------------------------------------------
+    # =====================================================
+    # Flask
+    # =====================================================
 
     threading.Thread(
 
@@ -2677,9 +3040,9 @@ def main():
 
     ).start()
 
-    # ---------------------------------------------
+    # =====================================================
     # Telegram
-    # ---------------------------------------------
+    # =====================================================
 
     application = (
 
@@ -2691,9 +3054,9 @@ def main():
 
     )
 
-    # ---------------------------------------------
+    # =====================================================
     # Commands
-    # ---------------------------------------------
+    # =====================================================
 
     application.add_handler(
 
@@ -2713,9 +3076,9 @@ def main():
 
     )
 
-    # ---------------------------------------------
+    # =====================================================
     # Buttons
-    # ---------------------------------------------
+    # =====================================================
 
     application.add_handler(
 
@@ -2725,9 +3088,9 @@ def main():
 
     )
 
-    # ---------------------------------------------
+    # =====================================================
     # Text
-    # ---------------------------------------------
+    # =====================================================
 
     application.add_handler(
 
