@@ -50,9 +50,14 @@ if not TWELVE_DATA_API_KEY:
 
 SYMBOL = "XAU/USD"
 
+# فحص السعر والدخول و SL/TP
 MONITOR_SECONDS = 15
 
+# إعادة التحليل كل 5 دقائق عند WAIT أو الخطأ
 WAIT_REANALYZE_SECONDS = 300
+
+# رسالة حالة كل 5 دقائق
+STATUS_UPDATE_SECONDS = 300
 
 analysis_lock = asyncio.Lock()
 
@@ -158,6 +163,11 @@ def send_gemini_message(prompt):
             )
 
             if text:
+
+                print(
+                    "Gemini success:",
+                    model_name
+                )
 
                 return text.strip()
 
@@ -421,34 +431,6 @@ def close_trade(
     connection.close()
 
 
-def cancel_trade(trade_id):
-
-    connection = db_connect()
-
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        UPDATE trades
-
-        SET status = 'cancelled',
-            closed_at = ?
-
-        WHERE id = ?
-    """, (
-
-        datetime.now(
-            timezone.utc
-        ).isoformat(),
-
-        trade_id,
-
-    ))
-
-    connection.commit()
-
-    connection.close()
-
-
 def cancel_user_active_trade(user_id):
 
     connection = db_connect()
@@ -489,6 +471,8 @@ def cancel_user_active_trade(user_id):
 autopilot_users = set()
 
 user_wait_tasks = {}
+
+user_status_tasks = {}
 
 
 # =========================================================
@@ -1110,6 +1094,373 @@ M1 - آخر 6 ساعات:
 
 
 # =========================================================
+# UNREALIZED PNL
+# =========================================================
+
+def calculate_unrealized_points(
+    direction,
+    entry,
+    current_price
+):
+
+    if direction == "BUY":
+
+        return current_price - entry
+
+    return entry - current_price
+
+
+# =========================================================
+# STATUS HEARTBEAT
+# =========================================================
+
+async def status_heartbeat_loop(
+    application,
+    user_id
+):
+
+    while user_id in autopilot_users:
+
+        try:
+
+            await asyncio.sleep(
+                STATUS_UPDATE_SECONDS
+            )
+
+            if user_id not in autopilot_users:
+
+                return
+
+            # ---------------------------------------------
+            # الحصول على السعر الحالي
+            # ---------------------------------------------
+
+            price = None
+
+            try:
+
+                price = get_gold_price()
+
+            except Exception as e:
+
+                print(
+                    "STATUS PRICE ERROR:",
+                    e
+                )
+
+            # ---------------------------------------------
+            # السعر فشل
+            # ---------------------------------------------
+
+            if price is None:
+
+                await application.bot.send_message(
+
+                    chat_id=user_id,
+
+                    text=(
+                        "⚠️ نبضة المتابعة\n\n"
+                        "البوت ما زال يعمل، "
+                        "لكن تعذر جلب سعر الذهب الآن.\n\n"
+                        "إذا استمر الخطأ، "
+                        "اضغط إيقاف المتابعة والتحليل "
+                        "ثم شغّله من جديد."
+                    ),
+
+                    reply_markup=stop_keyboard()
+                )
+
+                continue
+
+            # ---------------------------------------------
+            # الحصول على الصفقة
+            # ---------------------------------------------
+
+            trade = get_active_trade(
+                user_id
+            )
+
+            # ---------------------------------------------
+            # لا توجد صفقة
+            # ---------------------------------------------
+
+            if not trade:
+
+                await application.bot.send_message(
+
+                    chat_id=user_id,
+
+                    text=(
+                        "🟢 نبضة المتابعة\n\n"
+                        "🤖 البوت يعمل.\n"
+                        "🧠 لا توجد صفقة مفتوحة حاليًا.\n\n"
+                        f"💰 السعر الحالي: {price}\n\n"
+                        "⏳ بانتظار التحليل القادم."
+                    ),
+
+                    reply_markup=stop_keyboard()
+                )
+
+                continue
+
+            # ---------------------------------------------
+            # WAITING ENTRY
+            # ---------------------------------------------
+
+            if trade["status"] == "waiting_entry":
+
+                await application.bot.send_message(
+
+                    chat_id=user_id,
+
+                    text=(
+                        "🟢 نبضة المتابعة\n\n"
+
+                        "🤖 البوت يعمل ويتابع السعر.\n\n"
+
+                        f"💰 السعر الحالي: "
+                        f"{price}\n\n"
+
+                        f"📊 الاتجاه: "
+                        f"{trade['direction']}\n"
+
+                        f"🎯 Entry: "
+                        f"{trade['entry']}\n"
+
+                        f"🛑 SL: "
+                        f"{trade['stop_loss']}\n"
+
+                        f"💰 TP: "
+                        f"{trade['take_profit']}\n\n"
+
+                        "⏳ الحالة: بانتظار Entry."
+                    ),
+
+                    reply_markup=
+                        active_trade_keyboard(
+                            trade["id"]
+                        )
+                )
+
+                continue
+
+            # ---------------------------------------------
+            # IN TRADE
+            # ---------------------------------------------
+
+            if trade["status"] == "in_trade":
+
+                direction = trade["direction"]
+
+                entry = float(
+                    trade["entry"]
+                )
+
+                sl = float(
+                    trade["stop_loss"]
+                )
+
+                tp = float(
+                    trade["take_profit"]
+                )
+
+                current_points = (
+                    calculate_unrealized_points(
+                        direction,
+                        entry,
+                        price
+                    )
+                )
+
+                if current_points >= 0:
+
+                    pnl_text = (
+                        f"+{current_points:.2f} نقطة"
+                    )
+
+                    pnl_icon = "📈"
+
+                else:
+
+                    pnl_text = (
+                        f"{current_points:.2f} نقطة"
+                    )
+
+                    pnl_icon = "📉"
+
+                await application.bot.send_message(
+
+                    chat_id=user_id,
+
+                    text=(
+                        "🟢 نبضة المتابعة\n\n"
+
+                        f"💰 السعر الحالي: "
+                        f"{price}\n\n"
+
+                        f"{pnl_icon} الربح/الخسارة الحالية: "
+                        f"{pnl_text}\n\n"
+
+                        f"📊 الاتجاه: "
+                        f"{direction}\n"
+
+                        f"🎯 Entry: "
+                        f"{entry}\n"
+
+                        f"🛑 SL: "
+                        f"{sl}\n"
+
+                        f"💰 TP: "
+                        f"{tp}\n\n"
+
+                        "🔥 الحالة: داخل الصفقة.\n"
+                        "👀 أراقب SL و TP."
+                    ),
+
+                    reply_markup=
+                        active_trade_keyboard(
+                            trade["id"]
+                        )
+                )
+
+        except asyncio.CancelledError:
+
+            return
+
+        except Exception as e:
+
+            print(
+                "STATUS HEARTBEAT ERROR:",
+                e
+            )
+
+            if user_id in autopilot_users:
+
+                try:
+
+                    await application.bot.send_message(
+
+                        chat_id=user_id,
+
+                        text=(
+                            "⚠️ حصل خطأ في نبضة المتابعة.\n\n"
+                            "إذا استمر الخطأ، "
+                            "اضغط إيقاف المتابعة والتحليل "
+                            "ثم شغّل التحليل من جديد."
+                        ),
+
+                        reply_markup=stop_keyboard()
+                    )
+
+                except Exception as send_error:
+
+                    print(
+                        "STATUS SEND ERROR:",
+                        send_error
+                    )
+
+
+def start_status_heartbeat(
+    application,
+    user_id
+):
+
+    old_task = user_status_tasks.get(
+        user_id
+    )
+
+    if old_task:
+
+        old_task.cancel()
+
+    task = asyncio.create_task(
+        status_heartbeat_loop(
+            application,
+            user_id
+        )
+    )
+
+    user_status_tasks[user_id] = task
+
+
+def stop_status_heartbeat(user_id):
+
+    task = user_status_tasks.pop(
+        user_id,
+        None
+    )
+
+    if task:
+
+        task.cancel()
+
+
+# =========================================================
+# WAIT REANALYSIS
+# =========================================================
+
+async def wait_reanalysis_loop(
+    application,
+    user_id
+):
+
+    try:
+
+        await asyncio.sleep(
+            WAIT_REANALYZE_SECONDS
+        )
+
+        if user_id not in autopilot_users:
+
+            return
+
+        if get_active_trade(
+            user_id
+        ):
+
+            return
+
+        await run_auto_analysis(
+            application,
+            user_id
+        )
+
+    except asyncio.CancelledError:
+
+        return
+
+    except Exception as e:
+
+        print(
+            "WAIT REANALYSIS ERROR:",
+            e
+        )
+
+
+def schedule_wait_analysis(
+    application,
+    user_id
+):
+
+    old_task = user_wait_tasks.get(
+        user_id
+    )
+
+    if old_task:
+
+        old_task.cancel()
+
+    task = asyncio.create_task(
+        wait_reanalysis_loop(
+            application,
+            user_id
+        )
+    )
+
+    user_wait_tasks[user_id] = task
+
+
+# =========================================================
 # SEND AUTOMATIC ANALYSIS
 # =========================================================
 
@@ -1119,11 +1470,13 @@ async def run_auto_analysis(
 ):
 
     if user_id not in autopilot_users:
+
         return
 
     async with analysis_lock:
 
         if user_id not in autopilot_users:
+
             return
 
         existing = get_active_trade(
@@ -1131,12 +1484,15 @@ async def run_auto_analysis(
         )
 
         if existing:
+
             return
 
         try:
 
             await application.bot.send_message(
+
                 chat_id=user_id,
+
                 text=(
                     "🧠 Gemini يحلل الذهب...\n\n"
                     "📊 M5: آخر 24 ساعة\n"
@@ -1168,6 +1524,10 @@ async def run_auto_analysis(
                 result
             )
 
+            # =============================================
+            # WAIT
+            # =============================================
+
             if trade is None:
 
                 await application.bot.send_message(
@@ -1177,17 +1537,29 @@ async def run_auto_analysis(
                     text=(
                         result
                         + "\n\n"
-                        + "⏳ لا توجد صفقة الآن."
-                        + "\n"
-                        + "🔄 سأعيد التحليل تلقائيًا."
+                        + "⏳ لا توجد صفقة الآن.\n"
+                        + "🔄 سيتم إعادة التحليل بعد 5 دقائق."
                     ),
 
                     reply_markup=stop_keyboard()
                 )
 
+                schedule_wait_analysis(
+                    application,
+                    user_id
+                )
+
                 return
 
+            # =============================================
+            # PRICE AT RECOMMENDATION
+            # =============================================
+
             armed_price = get_gold_price()
+
+            # =============================================
+            # SAVE TRADE
+            # =============================================
 
             trade_id = create_trade(
 
@@ -1208,6 +1580,10 @@ async def run_auto_analysis(
                 armed_price=
                     armed_price
             )
+
+            # =============================================
+            # SEND RECOMMENDATION
+            # =============================================
 
             message = (
                 result
@@ -1238,9 +1614,11 @@ async def run_auto_analysis(
 
         except Exception as e:
 
+            error_text = str(e)
+
             print(
                 "AUTO ANALYSIS ERROR:",
-                e
+                error_text
             )
 
             if user_id in autopilot_users:
@@ -1250,11 +1628,25 @@ async def run_auto_analysis(
                     chat_id=user_id,
 
                     text=(
-                        "⚠️ حصل خطأ مؤقت أثناء التحليل.\n"
-                        "سأحاول التحليل مرة أخرى تلقائيًا."
+                        "⚠️ تعذر إكمال التحليل.\n\n"
+
+                        "🤖 المتابعة ما زالت مفعلة، "
+                        "لكن هذا التحليل لم يكتمل.\n\n"
+
+                        f"🔎 الخطأ:\n"
+                        f"{error_text[:700]}\n\n"
+
+                        "إذا تكرر الخطأ، اضغط "
+                        "«إيقاف التحليل والمتابعة» "
+                        "ثم شغّل التحليل من جديد."
                     ),
 
                     reply_markup=stop_keyboard()
+                )
+
+                schedule_wait_analysis(
+                    application,
+                    user_id
                 )
 
 
@@ -1307,8 +1699,6 @@ async def monitor_trades(
         "TRADE MONITOR STARTED"
     )
 
-    last_m1_time = None
-
     last_price = None
 
     while True:
@@ -1347,6 +1737,7 @@ async def monitor_trades(
                 user_id = trade["user_id"]
 
                 if user_id not in autopilot_users:
+
                     continue
 
                 direction = trade["direction"]
@@ -1361,10 +1752,6 @@ async def monitor_trades(
 
                 tp = float(
                     trade["take_profit"]
-                )
-
-                armed_price = float(
-                    trade["armed_price"]
                 )
 
                 status = trade["status"]
@@ -1433,8 +1820,10 @@ async def monitor_trades(
                                 f"💰 TP: "
                                 f"{tp}\n\n"
 
-                                "👀 بدأت مراقبة "
-                                "SL و TP."
+                                "🔥 الحالة: داخل الصفقة.\n"
+                                "👀 بدأت مراقبة SL و TP.\n\n"
+                                "🕐 سأرسل حالة الصفقة "
+                                "كل 5 دقائق."
                             ),
 
                             reply_markup=
@@ -1458,18 +1847,26 @@ async def monitor_trades(
                     if direction == "BUY":
 
                         if current_price >= tp:
+
                             hit_tp = True
 
                         elif current_price <= sl:
+
                             hit_sl = True
 
                     elif direction == "SELL":
 
                         if current_price <= tp:
+
                             hit_tp = True
 
                         elif current_price >= sl:
+
                             hit_sl = True
+
+                    # -------------------------------------
+                    # M1 HIGH / LOW
+                    # -------------------------------------
 
                     if candle:
 
@@ -1480,18 +1877,26 @@ async def monitor_trades(
                         if direction == "BUY":
 
                             if high >= tp:
+
                                 hit_tp = True
 
                             if low <= sl:
+
                                 hit_sl = True
 
                         elif direction == "SELL":
 
                             if low <= tp:
+
                                 hit_tp = True
 
                             if high >= sl:
+
                                 hit_sl = True
+
+                    # -------------------------------------
+                    # BOTH TP AND SL
+                    # -------------------------------------
 
                     if hit_tp and hit_sl:
 
@@ -1510,6 +1915,10 @@ async def monitor_trades(
                         else:
 
                             hit_tp = False
+
+                    # -------------------------------------
+                    # TP
+                    # -------------------------------------
 
                     if hit_tp:
 
@@ -1574,6 +1983,10 @@ async def monitor_trades(
                                 )
                             )
 
+                    # -------------------------------------
+                    # SL
+                    # -------------------------------------
+
                     elif hit_sl:
 
                         exit_price = sl
@@ -1615,7 +2028,7 @@ async def monitor_trades(
                                 f"🛑 SL: "
                                 f"{sl}\n"
 
-                                f"📉 الخسارة: "
+                                f"📉 النتيجة: "
                                 f"{points:.2f} نقطة\n"
 
                                 f"📊 النسبة: "
@@ -1639,10 +2052,6 @@ async def monitor_trades(
 
             last_price = current_price
 
-            if candle:
-
-                last_m1_time = candle["time"]
-
         except Exception as e:
 
             print(
@@ -1653,69 +2062,6 @@ async def monitor_trades(
         await asyncio.sleep(
             MONITOR_SECONDS
         )
-
-
-# =========================================================
-# WAIT RE-ANALYSIS
-# =========================================================
-
-async def wait_reanalysis_loop(
-    application,
-    user_id
-):
-
-    try:
-
-        await asyncio.sleep(
-            WAIT_REANALYZE_SECONDS
-        )
-
-        if user_id not in autopilot_users:
-            return
-
-        if get_active_trade(
-            user_id
-        ):
-            return
-
-        await run_auto_analysis(
-            application,
-            user_id
-        )
-
-    except asyncio.CancelledError:
-
-        return
-
-    except Exception as e:
-
-        print(
-            "WAIT REANALYSIS ERROR:",
-            e
-        )
-
-
-def schedule_wait_analysis(
-    application,
-    user_id
-):
-
-    old_task = user_wait_tasks.get(
-        user_id
-    )
-
-    if old_task:
-
-        old_task.cancel()
-
-    task = asyncio.create_task(
-        wait_reanalysis_loop(
-            application,
-            user_id
-        )
-    )
-
-    user_wait_tasks[user_id] = task
 
 
 # =========================================================
@@ -1732,6 +2078,19 @@ async def start_command(
     autopilot_users.discard(
         user_id
     )
+
+    stop_status_heartbeat(
+        user_id
+    )
+
+    old_task = user_wait_tasks.pop(
+        user_id,
+        None
+    )
+
+    if old_task:
+
+        old_task.cancel()
 
     await update.message.reply_text(
 
@@ -1808,7 +2167,11 @@ async def handle_text(
         )
 
         await update.message.reply_text(
-            "❌ حدث خطأ أثناء الاتصال بـ Gemini."
+
+            "❌ حدث خطأ أثناء الاتصال بـ Gemini.\n\n"
+            f"الخطأ:\n{str(e)[:500]}",
+
+            reply_markup=main_keyboard()
         )
 
 
@@ -1821,8 +2184,6 @@ async def show_current_price(
 ):
 
     query = update.callback_query
-
-    await query.answer()
 
     try:
 
@@ -1845,14 +2206,15 @@ async def show_current_price(
 
         await query.edit_message_text(
 
-            "❌ تعذر الحصول على السعر.",
+            "❌ تعذر الحصول على السعر.\n\n"
+            f"{str(e)[:500]}",
 
             reply_markup=main_keyboard()
         )
 
 
 # =========================================================
-# M5 ANALYSIS ONLY
+# M5 ANALYSIS
 # =========================================================
 
 async def show_m5_analysis(
@@ -1860,8 +2222,6 @@ async def show_m5_analysis(
 ):
 
     query = update.callback_query
-
-    await query.answer()
 
     try:
 
@@ -1915,14 +2275,15 @@ async def show_m5_analysis(
 
         await query.edit_message_text(
 
-            "❌ حدث خطأ في تحليل M5.",
+            "❌ حدث خطأ في تحليل M5.\n\n"
+            f"{str(e)[:500]}",
 
             reply_markup=main_keyboard()
         )
 
 
 # =========================================================
-# M1 ANALYSIS ONLY
+# M1 ANALYSIS
 # =========================================================
 
 async def show_m1_analysis(
@@ -1930,8 +2291,6 @@ async def show_m1_analysis(
 ):
 
     query = update.callback_query
-
-    await query.answer()
 
     try:
 
@@ -1985,7 +2344,8 @@ async def show_m1_analysis(
 
         await query.edit_message_text(
 
-            "❌ حدث خطأ في تحليل M1.",
+            "❌ حدث خطأ في تحليل M1.\n\n"
+            f"{str(e)[:500]}",
 
             reply_markup=main_keyboard()
         )
@@ -2009,12 +2369,16 @@ async def button_handler(
     user_id = update.effective_user.id
 
     # =====================================================
-    # MAIN MENU
+    # BACK MENU
     # =====================================================
 
     if data == "back_menu":
 
         autopilot_users.discard(
+            user_id
+        )
+
+        stop_status_heartbeat(
             user_id
         )
 
@@ -2047,6 +2411,11 @@ async def button_handler(
     if data == "gemini_analysis":
 
         autopilot_users.add(
+            user_id
+        )
+
+        start_status_heartbeat(
+            context.application,
             user_id
         )
 
@@ -2083,7 +2452,9 @@ async def button_handler(
                     f"{existing['take_profit']}\n\n"
 
                     f"الحالة: "
-                    f"{existing['status']}"
+                    f"{existing['status']}\n\n"
+
+                    "🟢 سأرسل حالة الصفقة كل 5 دقائق."
                 ),
 
                 reply_markup=
@@ -2097,7 +2468,8 @@ async def button_handler(
         await query.edit_message_text(
 
             "🚀 تم تشغيل التحليل التلقائي.\n\n"
-            "🧠 Gemini سيحلل الآن...",
+            "🧠 Gemini سيحلل الآن...\n"
+            "🟢 وسأرسل حالة المتابعة كل 5 دقائق.",
 
             reply_markup=stop_keyboard()
         )
@@ -2118,6 +2490,10 @@ async def button_handler(
     if data == "stop_all":
 
         autopilot_users.discard(
+            user_id
+        )
+
+        stop_status_heartbeat(
             user_id
         )
 
