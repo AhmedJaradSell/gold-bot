@@ -51,30 +51,92 @@ if not TWELVE_DATA_API_KEY:
 
 SYMBOL = "XAU/USD"
 
-# الفحص الداخلي كل 15 ثانية
+# =========================================================
+# TELEGRAM MONITORING
+# =========================================================
+
+# المراقبة الداخلية تبقى كل 15 ثانية
 MONITOR_SECONDS = 15
 
-# إعادة التحليل بعد WAIT
+# إعادة التحليل بعد WAIT كل 5 دقائق
 WAIT_REANALYZE_SECONDS = 300
 
 # رسالة السعر للمستخدم كل 5 دقائق
 PRICE_UPDATE_SECONDS = 300
 
+
 # =========================================================
-# TWELVE DATA RATE LIMIT SETTINGS
+# TWELVE DATA SAVING SETTINGS
 # =========================================================
 
-# السعر من Twelve Data يتم تحديثه بحد أقصى مرة كل 60 ثانية
-PRICE_CACHE_SECONDS = 60
+# =========================================================
+# مهم:
+# المراقبة كل 15 ثانية لا تعني طلب API كل 15 ثانية.
+#
+# السعر:
+# طلب فعلي من Twelve Data كل 5 دقائق كحد أدنى.
+#
+# M5 / M1:
+# طلب فعلي كل 15 دقيقة كحد أدنى.
+# =========================================================
 
-# شموع M5 يتم تحديثها كل 5 دقائق
-M5_CACHE_SECONDS = 300
+PRICE_CACHE_SECONDS = 300
 
-# شموع M1 يتم تحديثها كل دقيقة
-M1_CACHE_SECONDS = 60
+M5_CACHE_SECONDS = 900
 
-# عند 429 نوقف طلبات Twelve Data مؤقتًا
-TWELVE_RATE_LIMIT_COOLDOWN = 120
+M1_CACHE_SECONDS = 900
+
+# أقل فترة بين أي طلبين فعليين لـ Twelve Data
+# هذا يمنع تجاوز حد الطلبات بالدقيقة.
+TWELVE_MIN_REQUEST_GAP = 16
+
+# بعد 429 نوقف طلبات API مؤقتًا
+TWELVE_429_COOLDOWN = 90
+
+
+# =========================================================
+# TWELVE DATA GLOBAL CACHE
+# =========================================================
+
+twelve_lock = threading.Lock()
+
+twelve_next_request_time = 0.0
+
+twelve_cooldown_until = 0.0
+
+twelve_last_error_print = 0.0
+
+price_cache = {
+    "price": None,
+    "timestamp": 0.0,
+}
+
+m5_cache = {
+    "values": None,
+    "timestamp": 0.0,
+}
+
+m1_cache = {
+    "values": None,
+    "timestamp": 0.0,
+}
+
+# معلومات credits التي ترجع من Twelve Data
+twelve_credits_used = None
+twelve_credits_left = None
+twelve_last_request_time = None
+
+
+# =========================================================
+# CUSTOM ERRORS
+# =========================================================
+
+class TwelveDataRateLimitError(Exception):
+    pass
+
+
+class TwelveDataUnavailableError(Exception):
+    pass
 
 
 # =========================================================
@@ -356,7 +418,6 @@ def create_trade(
 
     cursor.execute("""
         INSERT INTO trades (
-
             user_id,
             direction,
             entry,
@@ -365,7 +426,6 @@ def create_trade(
             armed_price,
             status,
             created_at
-
         )
 
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -510,565 +570,522 @@ user_last_price_update_bucket = {}
 
 
 # =========================================================
-# TWELVE DATA CACHE
+# FLASK
 # =========================================================
 
-price_cache = {
-    "price": None,
-    "time": 0
-}
-
-m5_cache = {
-    "data": None,
-    "time": 0
-}
-
-m1_cache = {
-    "data": None,
-    "time": 0
-}
-
-latest_m1_cache = {
-    "data": None,
-    "time": 0
-}
+web_app = Flask(__name__)
 
 
-# وقت انتهاء الـ cooldown
-twelve_rate_limit_until = 0
+@web_app.route("/")
+def home():
 
-# قفل طلبات Twelve Data
-twelve_data_lock = threading.Lock()
+    return "Gold Gemini Bot is running!"
+
+
+@web_app.route("/health")
+def health():
+
+    return {
+        "status": "ok"
+    }
+
+
+def run_web_server():
+
+    port = int(
+        os.environ.get(
+            "PORT",
+            10000
+        )
+    )
+
+    web_app.run(
+        host="0.0.0.0",
+        port=port
+    )
 
 
 # =========================================================
-# TWELVE DATA REQUEST
+# TWELVE DATA CORE REQUEST
 # =========================================================
 
-def twelve_data_request(
+def _twelve_data_request(
     endpoint,
     params,
     timeout=20
 ):
 
-    global twelve_rate_limit_until
+    global twelve_next_request_time
+    global twelve_cooldown_until
+    global twelve_credits_used
+    global twelve_credits_left
+    global twelve_last_request_time
+    global twelve_last_error_print
 
-    now = time.time()
-
-    # =====================================================
-    # إذا كنا داخل فترة منع 429
-    # =====================================================
-
-    if now < twelve_rate_limit_until:
-
-        remaining = int(
-            twelve_rate_limit_until - now
-        )
-
-        raise Exception(
-            "Twelve Data Rate Limit "
-            f"- انتظر {remaining} ثانية."
-        )
-
-    try:
-
-        response = requests.get(
-            endpoint,
-            params=params,
-            timeout=timeout
-        )
-
-    except requests.RequestException as e:
-
-        raise Exception(
-            f"خطأ اتصال بـ Twelve Data: {e}"
-        )
-
-    print(
-        "TWELVE DATA HTTP:",
-        response.status_code
+    url = (
+        "https://api.twelvedata.com/"
+        + endpoint
     )
 
-    # =====================================================
-    # 429
-    # =====================================================
-
-    if response.status_code == 429:
-
-        twelve_rate_limit_until = (
-            time.time()
-            + TWELVE_RATE_LIMIT_COOLDOWN
-        )
-
-        print(
-            "TWELVE DATA 429"
-        )
-
-        print(
-            f"Cooldown: "
-            f"{TWELVE_RATE_LIMIT_COOLDOWN} seconds"
-        )
-
-        raise Exception(
-            "Twelve Data: "
-            "تم تجاوز حد الطلبات 429."
-        )
-
-    # =====================================================
-    # HTTP ERROR
-    # =====================================================
-
-    if response.status_code != 200:
-
-        try:
-
-            error_data = response.json()
-
-            message = error_data.get(
-                "message",
-                str(error_data)
-            )
-
-        except Exception:
-
-            message = response.text[:300]
-
-        raise Exception(
-            f"Twelve Data HTTP "
-            f"{response.status_code}: "
-            f"{message}"
-        )
-
-    # =====================================================
-    # JSON
-    # =====================================================
-
-    try:
-
-        data = response.json()
-
-    except Exception:
-
-        raise Exception(
-            "Twelve Data رجّع ردًا غير صالح."
-        )
-
-    # =====================================================
-    # API ERROR
-    # =====================================================
-
-    if data.get("status") == "error":
-
-        message = data.get(
-            "message",
-            "خطأ غير معروف من Twelve Data"
-        )
-
-        raise Exception(
-            f"Twelve Data: {message}"
-        )
-
-    return data
-
-
-# =========================================================
-# GOLD PRICE
-# =========================================================
-
-def get_gold_price(
-    force=False
-):
-
-    now = time.time()
-
-    # =====================================================
-    # CACHE
-    # =====================================================
-
-    if not force:
-
-        if (
-            price_cache["price"] is not None
-            and
-            now - price_cache["time"]
-            < PRICE_CACHE_SECONDS
-        ):
-
-            return price_cache["price"]
-
-    # =====================================================
-    # LOCK
-    # =====================================================
-
-    with twelve_data_lock:
-
-        # إعادة فحص الـcache بعد القفل
+    with twelve_lock:
 
         now = time.time()
 
-        if not force:
+        # ---------------------------------------------
+        # 429 cooldown
+        # ---------------------------------------------
 
-            if (
-                price_cache["price"] is not None
-                and
-                now - price_cache["time"]
-                < PRICE_CACHE_SECONDS
-            ):
+        if now < twelve_cooldown_until:
 
-                return price_cache["price"]
+            remaining = int(
+                twelve_cooldown_until
+                - now
+            )
 
-        url = (
-            "https://api.twelvedata.com/price"
+            raise TwelveDataRateLimitError(
+                f"Twelve Data cooldown: "
+                f"{remaining} ثانية"
+            )
+
+        # ---------------------------------------------
+        # Global request spacing
+        # ---------------------------------------------
+
+        wait_time = (
+            twelve_next_request_time
+            - now
         )
 
-        params = {
+        if wait_time > 0:
 
-            "symbol": SYMBOL,
+            time.sleep(
+                wait_time
+            )
 
-            "apikey":
-                TWELVE_DATA_API_KEY
+        # ---------------------------------------------
+        # Request
+        # ---------------------------------------------
 
-        }
+        try:
 
-        data = twelve_data_request(
+            response = requests.get(
+                url,
+                params=params,
+                timeout=timeout
+            )
 
-            url,
+        except requests.RequestException as e:
 
-            params,
+            raise TwelveDataUnavailableError(
+                f"Twelve Data network error: {e}"
+            )
 
-            timeout=15
+        twelve_last_request_time = (
+            datetime.now(
+                timezone.utc
+            ).isoformat()
         )
 
-        if "price" not in data:
+        # ---------------------------------------------
+        # Read credit headers
+        # ---------------------------------------------
 
-            raise Exception(
-                data.get(
-                    "message",
-                    "لم يصل سعر الذهب."
+        used_header = response.headers.get(
+            "api-credits-used"
+        )
+
+        left_header = response.headers.get(
+            "api-credits-left"
+        )
+
+        try:
+
+            if used_header is not None:
+
+                twelve_credits_used = int(
+                    used_header
+                )
+
+        except Exception:
+
+            pass
+
+        try:
+
+            if left_header is not None:
+
+                twelve_credits_left = int(
+                    left_header
+                )
+
+        except Exception:
+
+            pass
+
+        # ---------------------------------------------
+        # Next request cannot happen immediately
+        # ---------------------------------------------
+
+        twelve_next_request_time = (
+            time.time()
+            + TWELVE_MIN_REQUEST_GAP
+        )
+
+        # ---------------------------------------------
+        # 429
+        # ---------------------------------------------
+
+        if response.status_code == 429:
+
+            retry_after = (
+                response.headers.get(
+                    "Retry-After"
                 )
             )
 
-        price = float(
-            data["price"]
+            cooldown = (
+                TWELVE_429_COOLDOWN
+            )
+
+            if retry_after:
+
+                try:
+
+                    cooldown = max(
+                        cooldown,
+                        int(
+                            float(
+                                retry_after
+                            )
+                        )
+                    )
+
+                except Exception:
+
+                    pass
+
+            twelve_cooldown_until = (
+                time.time()
+                + cooldown
+            )
+
+            if (
+                time.time()
+                - twelve_last_error_print
+                > 60
+            ):
+
+                print(
+                    "Twelve Data 429 - "
+                    f"cooldown {cooldown}s"
+                )
+
+                twelve_last_error_print = (
+                    time.time()
+                )
+
+            raise TwelveDataRateLimitError(
+                f"Twelve Data 429. "
+                f"إيقاف الطلبات {cooldown} ثانية."
+            )
+
+        # ---------------------------------------------
+        # Parse JSON
+        # ---------------------------------------------
+
+        try:
+
+            data = response.json()
+
+        except Exception:
+
+            raise TwelveDataUnavailableError(
+                f"Twelve Data HTTP "
+                f"{response.status_code}: "
+                "رد غير صالح من الخادم."
+            )
+
+        # ---------------------------------------------
+        # API error inside JSON
+        # ---------------------------------------------
+
+        if isinstance(data, dict):
+
+            if data.get("status") == "error":
+
+                code = str(
+                    data.get(
+                        "code",
+                        ""
+                    )
+                )
+
+                message = data.get(
+                    "message",
+                    "Twelve Data error"
+                )
+
+                if code == "429":
+
+                    twelve_cooldown_until = (
+                        time.time()
+                        + TWELVE_429_COOLDOWN
+                    )
+
+                    raise TwelveDataRateLimitError(
+                        "Twelve Data 429: "
+                        + str(message)
+                    )
+
+                raise TwelveDataUnavailableError(
+                    "Twelve Data: "
+                    + str(message)
+                )
+
+        # ---------------------------------------------
+        # HTTP errors
+        # ---------------------------------------------
+
+        if response.status_code >= 400:
+
+            raise TwelveDataUnavailableError(
+                f"Twelve Data HTTP "
+                f"{response.status_code}"
+            )
+
+        return data
+
+
+# =========================================================
+# PRICE
+# =========================================================
+
+def get_gold_price():
+
+    now = time.time()
+
+    cached_price = price_cache.get(
+        "price"
+    )
+
+    cached_time = price_cache.get(
+        "timestamp",
+        0
+    )
+
+    # =============================================
+    # Cache
+    # =============================================
+
+    if (
+        cached_price is not None
+        and now - cached_time
+        < PRICE_CACHE_SECONDS
+    ):
+
+        return float(
+            cached_price
         )
 
-        price_cache["price"] = price
+    params = {
 
-        price_cache["time"] = time.time()
+        "symbol": SYMBOL,
 
-        print(
-            f"Twelve Data PRICE: {price}"
+        "apikey":
+            TWELVE_DATA_API_KEY
+    }
+
+    try:
+
+        data = _twelve_data_request(
+            "price",
+            params,
+            timeout=15
         )
 
-        return price
+    except TwelveDataRateLimitError:
+
+        # إذا عندنا سعر قديم، نستخدمه
+        if cached_price is not None:
+
+            return float(
+                cached_price
+            )
+
+        raise
+
+    if "price" not in data:
+
+        raise Exception(
+            data.get(
+                "message",
+                "لم يصل سعر الذهب."
+            )
+        )
+
+    price = float(
+        data["price"]
+    )
+
+    price_cache["price"] = price
+
+    price_cache["timestamp"] = time.time()
+
+    return price
 
 
 # =========================================================
 # M5
 # =========================================================
 
-def get_gold_m5(
-    force=False
-):
+def get_gold_m5():
 
     now = time.time()
 
-    # =====================================================
-    # CACHE
-    # =====================================================
+    cached_values = m5_cache.get(
+        "values"
+    )
 
-    if not force:
+    cached_time = m5_cache.get(
+        "timestamp",
+        0
+    )
 
-        if (
-            m5_cache["data"] is not None
-            and
-            now - m5_cache["time"]
-            < M5_CACHE_SECONDS
-        ):
+    if (
+        cached_values
+        and now - cached_time
+        < M5_CACHE_SECONDS
+    ):
 
-            print(
-                "M5 CACHE USED"
-            )
+        return cached_values
 
-            return m5_cache["data"]
+    params = {
 
-    # =====================================================
-    # LOCK
-    # =====================================================
+        "symbol": SYMBOL,
 
-    with twelve_data_lock:
+        "interval": "5min",
 
-        now = time.time()
+        "outputsize": 288,
 
-        if not force:
+        "order": "asc",
 
-            if (
-                m5_cache["data"] is not None
-                and
-                now - m5_cache["time"]
-                < M5_CACHE_SECONDS
-            ):
+        "timezone": "UTC",
 
-                return m5_cache["data"]
+        "apikey":
+            TWELVE_DATA_API_KEY
+    }
 
-        url = (
-            "https://api.twelvedata.com/time_series"
-        )
+    try:
 
-        params = {
-
-            "symbol": SYMBOL,
-
-            "interval": "5min",
-
-            "outputsize": 288,
-
-            "order": "asc",
-
-            "timezone": "UTC",
-
-            "apikey":
-                TWELVE_DATA_API_KEY
-
-        }
-
-        data = twelve_data_request(
-
-            url,
-
+        data = _twelve_data_request(
+            "time_series",
             params,
-
             timeout=30
         )
 
-        values = data.get(
-            "values"
-        )
+    except TwelveDataRateLimitError:
 
-        if not values:
+        if cached_values:
 
-            raise Exception(
+            return cached_values
+
+        raise
+
+    values = data.get(
+        "values"
+    )
+
+    if not values:
+
+        raise Exception(
+            data.get(
+                "message",
                 "لم تصل شموع M5."
             )
-
-        m5_cache["data"] = values
-
-        m5_cache["time"] = time.time()
-
-        print(
-            "Twelve Data M5 UPDATED"
         )
 
-        return values
+    m5_cache["values"] = values
+
+    m5_cache["timestamp"] = time.time()
+
+    return values
 
 
 # =========================================================
 # M1
 # =========================================================
 
-def get_gold_m1(
-    force=False
-):
+def get_gold_m1():
 
     now = time.time()
 
-    # =====================================================
-    # CACHE
-    # =====================================================
+    cached_values = m1_cache.get(
+        "values"
+    )
 
-    if not force:
+    cached_time = m1_cache.get(
+        "timestamp",
+        0
+    )
 
-        if (
-            m1_cache["data"] is not None
-            and
-            now - m1_cache["time"]
-            < M1_CACHE_SECONDS
-        ):
+    if (
+        cached_values
+        and now - cached_time
+        < M1_CACHE_SECONDS
+    ):
 
-            print(
-                "M1 CACHE USED"
-            )
+        return cached_values
 
-            return m1_cache["data"]
+    params = {
 
-    # =====================================================
-    # LOCK
-    # =====================================================
+        "symbol": SYMBOL,
 
-    with twelve_data_lock:
+        "interval": "1min",
 
-        now = time.time()
+        "outputsize": 360,
 
-        if not force:
+        "order": "asc",
 
-            if (
-                m1_cache["data"] is not None
-                and
-                now - m1_cache["time"]
-                < M1_CACHE_SECONDS
-            ):
+        "timezone": "UTC",
 
-                return m1_cache["data"]
+        "apikey":
+            TWELVE_DATA_API_KEY
+    }
 
-        url = (
-            "https://api.twelvedata.com/time_series"
-        )
+    try:
 
-        params = {
-
-            "symbol": SYMBOL,
-
-            "interval": "1min",
-
-            "outputsize": 360,
-
-            "order": "asc",
-
-            "timezone": "UTC",
-
-            "apikey":
-                TWELVE_DATA_API_KEY
-
-        }
-
-        data = twelve_data_request(
-
-            url,
-
+        data = _twelve_data_request(
+            "time_series",
             params,
-
             timeout=30
         )
 
-        values = data.get(
-            "values"
-        )
+    except TwelveDataRateLimitError:
 
-        if not values:
+        if cached_values:
 
-            raise Exception(
+            return cached_values
+
+        raise
+
+    values = data.get(
+        "values"
+    )
+
+    if not values:
+
+        raise Exception(
+            data.get(
+                "message",
                 "لم تصل شموع M1."
             )
-
-        m1_cache["data"] = values
-
-        m1_cache["time"] = time.time()
-
-        print(
-            "Twelve Data M1 UPDATED"
         )
 
-        return values
+    m1_cache["values"] = values
 
+    m1_cache["timestamp"] = time.time()
 
-# =========================================================
-# LATEST M1
-# =========================================================
-
-def get_latest_m1(
-    force=False
-):
-
-    now = time.time()
-
-    # =====================================================
-    # CACHE
-    # =====================================================
-
-    if not force:
-
-        if (
-            latest_m1_cache["data"] is not None
-            and
-            now - latest_m1_cache["time"]
-            < M1_CACHE_SECONDS
-        ):
-
-            return latest_m1_cache["data"]
-
-    # =====================================================
-    # LOCK
-    # =====================================================
-
-    with twelve_data_lock:
-
-        now = time.time()
-
-        if not force:
-
-            if (
-                latest_m1_cache["data"] is not None
-                and
-                now - latest_m1_cache["time"]
-                < M1_CACHE_SECONDS
-            ):
-
-                return latest_m1_cache["data"]
-
-        url = (
-            "https://api.twelvedata.com/time_series"
-        )
-
-        params = {
-
-            "symbol": SYMBOL,
-
-            "interval": "1min",
-
-            "outputsize": 1,
-
-            "order": "desc",
-
-            "timezone": "UTC",
-
-            "apikey":
-                TWELVE_DATA_API_KEY
-
-        }
-
-        data = twelve_data_request(
-
-            url,
-
-            params,
-
-            timeout=20
-        )
-
-        values = data.get(
-            "values"
-        )
-
-        if not values:
-
-            return None
-
-        candle = values[0]
-
-        result = {
-
-            "time":
-                candle.get("datetime"),
-
-            "open":
-                float(candle.get("open")),
-
-            "high":
-                float(candle.get("high")),
-
-            "low":
-                float(candle.get("low")),
-
-            "close":
-                float(candle.get("close")),
-
-        }
-
-        latest_m1_cache["data"] = result
-
-        latest_m1_cache["time"] = time.time()
-
-        return result
+    return values
 
 
 # =========================================================
@@ -1439,25 +1456,13 @@ async def wait_reanalysis_loop(
 
         if user_id not in autopilot_users:
 
-            print(
-                f"WAIT TIMER STOPPED user={user_id}"
-            )
-
             return
 
         if get_active_trade(
             user_id
         ):
 
-            print(
-                f"WAIT TIMER FOUND ACTIVE TRADE user={user_id}"
-            )
-
             return
-
-        print(
-            f"WAIT TIMER REANALYZING user={user_id}"
-        )
 
         await run_auto_analysis(
             application,
@@ -1465,10 +1470,6 @@ async def wait_reanalysis_loop(
         )
 
     except asyncio.CancelledError:
-
-        print(
-            f"WAIT TIMER CANCELLED user={user_id}"
-        )
 
         return
 
@@ -1667,10 +1668,6 @@ async def run_auto_analysis(
 
         if existing:
 
-            print(
-                f"ANALYSIS SKIPPED ACTIVE TRADE user={user_id}"
-            )
-
             return
 
         try:
@@ -1687,7 +1684,7 @@ async def run_auto_analysis(
             )
 
             # =============================================
-            # طلب السعر مرة واحدة فقط
+            # السعر مرة واحدة فقط
             # =============================================
 
             price = await asyncio.to_thread(
@@ -1695,16 +1692,13 @@ async def run_auto_analysis(
             )
 
             # =============================================
-            # M5
+            # M5 و M1
+            # تستخدم Cache
             # =============================================
 
             m5_raw = await asyncio.to_thread(
                 get_gold_m5
             )
-
-            # =============================================
-            # M1
-            # =============================================
 
             m1_raw = await asyncio.to_thread(
                 get_gold_m1
@@ -1733,9 +1727,9 @@ async def run_auto_analysis(
                 result
             )
 
-            # =================================================
+            # =============================================
             # WAIT
-            # =================================================
+            # =============================================
 
             if trade is None:
 
@@ -1761,9 +1755,9 @@ async def run_auto_analysis(
 
                 return
 
-            # =================================================
-            # CREATE TRADE
-            # =================================================
+            # =============================================
+            # تأكيد عدم وجود صفقة
+            # =============================================
 
             existing = get_active_trade(
                 user_id
@@ -1771,17 +1765,12 @@ async def run_auto_analysis(
 
             if existing:
 
-                print(
-                    f"TRADE CREATION SKIPPED user={user_id}"
-                )
-
                 return
 
-            # =================================================
-            # مهم:
-            # نستخدم نفس السعر الذي جلبناه في بداية التحليل
-            # بدل طلب Twelve Data مرة ثانية
-            # =================================================
+            # =============================================
+            # نستخدم نفس السعر
+            # لا يوجد طلب API ثاني
+            # =============================================
 
             armed_price = price
 
@@ -1835,15 +1824,9 @@ async def run_auto_analysis(
                 + f"💵 السعر وقت التوصية: "
                 f"{armed_price:.2f}"
 
-                + "\n"
-
-                + "⚠️ لن أعتبر الصفقة داخلة "
-                  "إلا عند عبور مستوى Entry "
-                  "المحدد في هذه التوصية."
-
                 + "\n\n"
 
-                + "🕐 سأرسل لك تحديث السعر "
+                + "🕐 سأرسل تحديث السعر "
                   "كل 5 دقائق أثناء المتابعة."
             )
 
@@ -1858,6 +1841,33 @@ async def run_auto_analysis(
                         trade_id
                     )
             )
+
+        except TwelveDataRateLimitError as e:
+
+            print(
+                "AUTO ANALYSIS TWELVE RATE LIMIT:",
+                e
+            )
+
+            if user_id in autopilot_users:
+
+                await application.bot.send_message(
+
+                    chat_id=user_id,
+
+                    text=(
+                        "⏳ Twelve Data وصل لحد الطلبات مؤقتًا.\n\n"
+                        "لن أكرر الطلبات حتى لا أستهلك الـcredits.\n"
+                        "🔄 سأعيد المحاولة تلقائيًا بعد قليل."
+                    ),
+
+                    reply_markup=stop_keyboard()
+                )
+
+                schedule_wait_analysis(
+                    application,
+                    user_id
+                )
 
         except Exception as e:
 
@@ -1874,8 +1884,7 @@ async def run_auto_analysis(
 
                     text=(
                         "⚠️ حصل خطأ مؤقت أثناء التحليل.\n\n"
-                        f"التفاصيل: {str(e)[:300]}\n\n"
-                        "🔄 سأحاول التحليل مرة أخرى بعد 5 دقائق."
+                        "🔄 سأحاول مرة أخرى بعد 5 دقائق."
                     ),
 
                     reply_markup=stop_keyboard()
@@ -1904,11 +1913,6 @@ def calculate_pnl(
             - entry
         )
 
-        percent = (
-            points
-            / entry
-        ) * 100
-
     else:
 
         points = (
@@ -1916,10 +1920,10 @@ def calculate_pnl(
             - exit_price
         )
 
-        percent = (
-            points
-            / entry
-        ) * 100
+    percent = (
+        points
+        / entry
+    ) * 100
 
     return points, percent
 
@@ -1951,52 +1955,19 @@ async def monitor_trades(
                 continue
 
             # =================================================
-            # السعر الحالي
+            # IMPORTANT:
+            # هذا قد يرجع Cache فقط.
+            # لا يوجد طلب API كل 15 ثانية.
+            # =================================================
+
+            current_price = await asyncio.to_thread(
+                get_gold_price
+            )
+
+            # =================================================
+            # لا يوجد get_latest_m1() هنا.
             #
-            # get_gold_price يستخدم CACHE
-            # لذلك لن يضرب Twelve Data كل 15 ثانية
-            # =================================================
-
-            try:
-
-                current_price = await asyncio.to_thread(
-                    get_gold_price
-                )
-
-            except Exception as e:
-
-                print(
-                    "MONITOR PRICE ERROR:",
-                    e
-                )
-
-                await asyncio.sleep(
-                    MONITOR_SECONDS
-                )
-
-                continue
-
-            # =================================================
-            # M1 الحالي
-            # =================================================
-
-            candle = None
-
-            try:
-
-                candle = await asyncio.to_thread(
-                    get_latest_m1
-                )
-
-            except Exception as e:
-
-                print(
-                    "M1 monitor error:",
-                    e
-                )
-
-            # =================================================
-            # معالجة كل مستخدم
+            # هذا كان يستهلك API كل 15 ثانية.
             # =================================================
 
             for trade in trades:
@@ -2025,19 +1996,15 @@ async def monitor_trades(
 
                 status = trade["status"]
 
-                # =================================================
-                # السعر السابق
-                # =================================================
-
                 previous_price = (
                     user_last_price.get(
                         user_id
                     )
                 )
 
-                # =================================================
-                # تحديث كل 5 دقائق
-                # =================================================
+                # =========================================
+                # تحديث 5 دقائق
+                # =========================================
 
                 await send_five_minute_price_update(
 
@@ -2050,26 +2017,20 @@ async def monitor_trades(
                     trade
                 )
 
-                # =================================================
+                # =========================================
                 # WAITING ENTRY
-                # =================================================
+                # =========================================
 
                 if status == "waiting_entry":
 
                     entered = False
 
-                    # =================================================
-                    # BUY
-                    # =================================================
-
                     if direction == "BUY":
 
                         if (
                             previous_price is not None
-                            and
-                            previous_price < entry
-                            and
-                            current_price >= entry
+                            and previous_price < entry
+                            and current_price >= entry
                         ):
 
                             entered = True
@@ -2077,19 +2038,13 @@ async def monitor_trades(
                         elif current_price == entry:
 
                             entered = True
-
-                    # =================================================
-                    # SELL
-                    # =================================================
 
                     elif direction == "SELL":
 
                         if (
                             previous_price is not None
-                            and
-                            previous_price > entry
-                            and
-                            current_price <= entry
+                            and previous_price > entry
+                            and current_price <= entry
                         ):
 
                             entered = True
@@ -2097,10 +2052,6 @@ async def monitor_trades(
                         elif current_price == entry:
 
                             entered = True
-
-                    # =================================================
-                    # ENTRY HIT
-                    # =================================================
 
                     if entered:
 
@@ -2133,7 +2084,7 @@ async def monitor_trades(
 
                                 "👀 بدأت مراقبة SL و TP.\n"
 
-                                "🕐 سأرسل تحديث السعر كل 5 دقائق."
+                                "🕐 تحديث السعر كل 5 دقائق."
                             ),
 
                             reply_markup=
@@ -2142,21 +2093,21 @@ async def monitor_trades(
                                 )
                         )
 
+                        user_last_price[
+                            user_id
+                        ] = current_price
+
                         continue
 
-                # =================================================
+                # =========================================
                 # IN TRADE
-                # =================================================
+                # =========================================
 
                 if status == "in_trade":
 
                     hit_tp = False
 
                     hit_sl = False
-
-                    # =================================================
-                    # السعر الحالي
-                    # =================================================
 
                     if direction == "BUY":
 
@@ -2178,61 +2129,9 @@ async def monitor_trades(
 
                             hit_sl = True
 
-                    # =================================================
-                    # High / Low لآخر M1
-                    # =================================================
-
-                    if candle:
-
-                        high = candle["high"]
-
-                        low = candle["low"]
-
-                        if direction == "BUY":
-
-                            if high >= tp:
-
-                                hit_tp = True
-
-                            if low <= sl:
-
-                                hit_sl = True
-
-                        elif direction == "SELL":
-
-                            if low <= tp:
-
-                                hit_tp = True
-
-                            if high >= sl:
-
-                                hit_sl = True
-
-                    # =================================================
-                    # إذا الاثنين انضربوا في نفس الدورة
-                    # =================================================
-
-                    if hit_tp and hit_sl:
-
-                        distance_tp = abs(
-                            current_price - tp
-                        )
-
-                        distance_sl = abs(
-                            current_price - sl
-                        )
-
-                        if distance_tp <= distance_sl:
-
-                            hit_sl = False
-
-                        else:
-
-                            hit_tp = False
-
-                    # =================================================
-                    # TAKE PROFIT
-                    # =================================================
+                    # =====================================
+                    # TP
+                    # =====================================
 
                     if hit_tp:
 
@@ -2276,7 +2175,7 @@ async def monitor_trades(
                                 f"💰 TP: "
                                 f"{tp:.2f}\n"
 
-                                f"📈 الربح: "
+                                f"📈 النتيجة: "
                                 f"+{points:.2f} نقطة\n"
 
                                 f"📊 النسبة: "
@@ -2304,9 +2203,9 @@ async def monitor_trades(
                                 )
                             )
 
-                    # =================================================
-                    # STOP LOSS
-                    # =================================================
+                    # =====================================
+                    # SL
+                    # =====================================
 
                     elif hit_sl:
 
@@ -2378,13 +2277,16 @@ async def monitor_trades(
                                 )
                             )
 
-                # =================================================
-                # حفظ السعر السابق
-                # =================================================
-
                 user_last_price[
                     user_id
                 ] = current_price
+
+        except TwelveDataRateLimitError as e:
+
+            print(
+                "MONITOR TWELVE RATE LIMIT:",
+                e
+            )
 
         except Exception as e:
 
@@ -2553,15 +2455,15 @@ async def show_current_price(
 
         await query.edit_message_text(
 
-            f"❌ تعذر الحصول على السعر.\n\n"
-            f"السبب: {str(e)[:300]}",
+            "❌ تعذر الحصول على السعر حاليًا.\n"
+            "حاول مرة أخرى بعد قليل.",
 
             reply_markup=main_keyboard()
         )
 
 
 # =========================================================
-# M5 ANALYSIS
+# M5 ANALYSIS ONLY
 # =========================================================
 
 async def show_m5_analysis(
@@ -2639,15 +2541,14 @@ Market Structure،
 
         await query.edit_message_text(
 
-            f"❌ حدث خطأ في تحليل M5.\n\n"
-            f"السبب: {str(e)[:300]}",
+            "❌ حدث خطأ في تحليل M5.",
 
             reply_markup=main_keyboard()
         )
 
 
 # =========================================================
-# M1 ANALYSIS
+# M1 ANALYSIS ONLY
 # =========================================================
 
 async def show_m1_analysis(
@@ -2725,8 +2626,7 @@ Market Structure،
 
         await query.edit_message_text(
 
-            f"❌ حدث خطأ في تحليل M1.\n\n"
-            f"السبب: {str(e)[:300]}",
+            "❌ حدث خطأ في تحليل M1.",
 
             reply_markup=main_keyboard()
         )
@@ -2859,7 +2759,7 @@ async def button_handler(
         return
 
     # =====================================================
-    # STOP EVERYTHING
+    # STOP
     # =====================================================
 
     if data == "stop_all":
@@ -2890,7 +2790,7 @@ async def button_handler(
 
             "⛔ تم إيقاف التحليل والمتابعة بالكامل.\n\n"
 
-            "تم إلغاء أي صفقة كانت قيد المتابعة.\n"
+            "تم إلغاء أي صفقة كانت قيد المتابعة.\n\n"
 
             "لن يبدأ تحليل جديد حتى تضغط تشغيل.",
 
@@ -2973,42 +2873,6 @@ async def post_init(
 
 
 # =========================================================
-# FLASK
-# =========================================================
-
-web_app = Flask(__name__)
-
-
-@web_app.route("/")
-def home():
-
-    return "Gold Gemini Bot is running!"
-
-
-@web_app.route("/health")
-def health():
-
-    return {
-        "status": "ok"
-    }
-
-
-def run_web_server():
-
-    port = int(
-        os.environ.get(
-            "PORT",
-            10000
-        )
-    )
-
-    web_app.run(
-        host="0.0.0.0",
-        port=port
-    )
-
-
-# =========================================================
 # MAIN
 # =========================================================
 
@@ -3028,10 +2892,7 @@ def main():
 
     init_database()
 
-    # =====================================================
     # Flask
-    # =====================================================
-
     threading.Thread(
 
         target=run_web_server,
@@ -3040,10 +2901,7 @@ def main():
 
     ).start()
 
-    # =====================================================
     # Telegram
-    # =====================================================
-
     application = (
 
         Application
@@ -3053,10 +2911,6 @@ def main():
         .build()
 
     )
-
-    # =====================================================
-    # Commands
-    # =====================================================
 
     application.add_handler(
 
@@ -3076,10 +2930,6 @@ def main():
 
     )
 
-    # =====================================================
-    # Buttons
-    # =====================================================
-
     application.add_handler(
 
         CallbackQueryHandler(
@@ -3087,10 +2937,6 @@ def main():
         )
 
     )
-
-    # =====================================================
-    # Text
-    # =====================================================
 
     application.add_handler(
 
