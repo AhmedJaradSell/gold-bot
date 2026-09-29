@@ -50,14 +50,11 @@ if not TWELVE_DATA_API_KEY:
 
 SYMBOL = "XAU/USD"
 
-# فحص السعر كل 15 ثانية أثناء وجود متابعة
+# فحص المتابعة كل 15 ثانية
 MONITOR_SECONDS = 15
 
-# إعادة التحليل بعد WAIT
+# إذا لم توجد فرصة WAIT يعيد التحليل بعد 5 دقائق
 WAIT_REANALYZE_SECONDS = 300
-
-# كاش السعر
-PRICE_CACHE_SECONDS = 30
 
 # منع أكثر من تحليل في نفس الوقت
 analysis_lock = asyncio.Lock()
@@ -76,13 +73,10 @@ MODEL_PRIORITY = [
     "gemini-3.6-flash",
     "gemini-3.7-flash",
     "gemini-3.8-flash",
-    "gemini-3-flash-preview",
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
     "gemini-2.5-flash",
     "gemini-2.5-flash-lite",
-    "gemini-flash-latest",
-    "gemini-flash-lite-latest",
 ]
 
 
@@ -106,6 +100,7 @@ def get_available_models():
                 continue
 
             if name.startswith("models/"):
+
                 name = name.replace(
                     "models/",
                     "",
@@ -131,6 +126,7 @@ def build_model_list():
     available = get_available_models()
 
     if not available:
+
         return MODEL_PRIORITY
 
     result = [
@@ -169,6 +165,7 @@ def send_gemini_message(prompt):
             )
 
             if text:
+
                 return text.strip()
 
             last_error = Exception(
@@ -185,6 +182,7 @@ def send_gemini_message(prompt):
             last_error = e
 
     if last_error:
+
         raise last_error
 
     raise Exception(
@@ -279,6 +277,7 @@ def get_active_trade(user_id):
     connection.close()
 
     if row:
+
         return dict(row)
 
     return None
@@ -322,6 +321,7 @@ def create_trade(
 
     cursor.execute("""
         INSERT INTO trades (
+
             user_id,
             direction,
             entry,
@@ -330,7 +330,9 @@ def create_trade(
             armed_price,
             status,
             created_at
+
         )
+
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     """, (
 
@@ -341,7 +343,6 @@ def create_trade(
         tp,
         armed_price,
         "waiting_entry",
-
         datetime.now(
             timezone.utc
         ).isoformat(),
@@ -358,8 +359,7 @@ def create_trade(
 
 
 def mark_entered(
-    trade_id,
-    actual_price
+    trade_id
 ):
 
     connection = db_connect()
@@ -370,13 +370,10 @@ def mark_entered(
         UPDATE trades
 
         SET status = 'in_trade',
-            armed_price = ?,
             entered_at = ?
 
         WHERE id = ?
     """, (
-
-        actual_price,
 
         datetime.now(
             timezone.utc
@@ -424,6 +421,35 @@ def close_trade(
         result,
         pnl_points,
         pnl_percent,
+        trade_id,
+
+    ))
+
+    connection.commit()
+
+    connection.close()
+
+
+def cancel_trade(
+    trade_id
+):
+
+    connection = db_connect()
+
+    cursor = connection.cursor()
+
+    cursor.execute("""
+        UPDATE trades
+
+        SET status = 'cancelled',
+            closed_at = ?
+
+        WHERE id = ?
+    """, (
+
+        datetime.now(
+            timezone.utc
+        ).isoformat(),
 
         trade_id,
 
@@ -434,7 +460,9 @@ def close_trade(
     connection.close()
 
 
-def cancel_user_active_trade(user_id):
+def cancel_user_active_trade(
+    user_id
+):
 
     connection = db_connect()
 
@@ -513,94 +541,10 @@ def run_web_server():
 
 
 # =========================================================
-# MARKET STATE
+# GOLD PRICE
 # =========================================================
 
-market_state = {
-
-    "price": None,
-
-    "previous_price": None,
-
-    "updated_at": None,
-
-    "last_5min_report": None,
-
-    "rate_limited_until": 0,
-
-}
-
-
-def get_cached_price(
-    max_age=60
-):
-
-    price = market_state["price"]
-
-    updated_at = market_state["updated_at"]
-
-    if price is None:
-        return None
-
-    if updated_at is None:
-        return None
-
-    age = (
-        datetime.now(timezone.utc)
-        - updated_at
-    ).total_seconds()
-
-    if age <= max_age:
-        return price
-
-    return None
-
-
-def get_gold_price(
-    force=False
-):
-
-    now = datetime.now(
-        timezone.utc
-    )
-
-    now_timestamp = now.timestamp()
-
-    # -----------------------------------------------------
-    # إذا Twelve Data أعطانا 429
-    # لا نكرر الطلبات خلال فترة الحظر
-    # -----------------------------------------------------
-
-    if (
-        now_timestamp
-        <
-        market_state["rate_limited_until"]
-    ):
-
-        cached = get_cached_price(
-            300
-        )
-
-        if cached is not None:
-            return cached
-
-        raise Exception(
-            "Twelve Data rate limit (429). "
-            "Retry after 60 seconds."
-        )
-
-    # -----------------------------------------------------
-    # استخدام الكاش إذا السعر حديث
-    # -----------------------------------------------------
-
-    if not force:
-
-        cached = get_cached_price(
-            PRICE_CACHE_SECONDS
-        )
-
-        if cached is not None:
-            return cached
+def get_gold_price():
 
     url = (
         "https://api.twelvedata.com/price"
@@ -611,137 +555,32 @@ def get_gold_price(
         "symbol": SYMBOL,
 
         "apikey":
-            TWELVE_DATA_API_KEY,
+            TWELVE_DATA_API_KEY
 
     }
 
-    response = None
-
-    try:
-
-        response = requests.get(
-            url,
-            params=params,
-            timeout=15
-        )
-
-        if response.status_code == 429:
-
-            market_state[
-                "rate_limited_until"
-            ] = (
-                datetime.now(
-                    timezone.utc
-                ).timestamp()
-                + 60
-            )
-
-            cached = get_cached_price(
-                300
-            )
-
-            if cached is not None:
-                return cached
-
-            raise Exception(
-                "Twelve Data rate limit (429). "
-                "Retry after 60 seconds."
-            )
-
-        response.raise_for_status()
-
-        data = response.json()
-
-        if "price" not in data:
-
-            raise Exception(
-                data.get(
-                    "message",
-                    "لم يصل سعر الذهب."
-                )
-            )
-
-        price = float(
-            data["price"]
-        )
-
-        # -------------------------------------------------
-        # تحديث السعر السابق والحالي
-        # -------------------------------------------------
-
-        market_state[
-            "previous_price"
-        ] = market_state["price"]
-
-        market_state[
-            "price"
-        ] = price
-
-        market_state[
-            "updated_at"
-        ] = datetime.now(
-            timezone.utc
-        )
-
-        return price
-
-    except requests.HTTPError:
-
-        if (
-            response is not None
-            and response.status_code == 429
-        ):
-
-            market_state[
-                "rate_limited_until"
-            ] = (
-                datetime.now(
-                    timezone.utc
-                ).timestamp()
-                + 60
-            )
-
-        raise
-
-
-# =========================================================
-# 5 MINUTE REPORT
-# =========================================================
-
-def is_5_minute_report_due():
-
-    now = datetime.now(
-        timezone.utc
+    response = requests.get(
+        url,
+        params=params,
+        timeout=15
     )
 
-    slot = (
+    response.raise_for_status()
 
-        now.year,
+    data = response.json()
 
-        now.month,
+    if "price" not in data:
 
-        now.day,
+        raise Exception(
+            data.get(
+                "message",
+                "لم يصل سعر الذهب."
+            )
+        )
 
-        now.hour,
-
-        now.minute // 5,
-
+    return float(
+        data["price"]
     )
-
-    if (
-        market_state[
-            "last_5min_report"
-        ]
-        != slot
-    ):
-
-        market_state[
-            "last_5min_report"
-        ] = slot
-
-        return True
-
-    return False
 
 
 # =========================================================
@@ -767,8 +606,7 @@ def get_gold_m5():
         "timezone": "UTC",
 
         "apikey":
-            TWELVE_DATA_API_KEY,
-
+            TWELVE_DATA_API_KEY
     }
 
     response = requests.get(
@@ -826,8 +664,7 @@ def get_gold_m1():
         "timezone": "UTC",
 
         "apikey":
-            TWELVE_DATA_API_KEY,
-
+            TWELVE_DATA_API_KEY
     }
 
     response = requests.get(
@@ -860,6 +697,81 @@ def get_gold_m1():
         )
 
     return values
+
+
+# =========================================================
+# LATEST M1
+# =========================================================
+
+def get_latest_m1():
+
+    url = (
+        "https://api.twelvedata.com/time_series"
+    )
+
+    params = {
+
+        "symbol": SYMBOL,
+
+        "interval": "1min",
+
+        "outputsize": 1,
+
+        "order": "desc",
+
+        "timezone": "UTC",
+
+        "apikey":
+            TWELVE_DATA_API_KEY
+    }
+
+    response = requests.get(
+        url,
+        params=params,
+        timeout=20
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if data.get("status") == "error":
+
+        raise Exception(
+            data.get(
+                "message",
+                "خطأ Twelve Data"
+            )
+        )
+
+    values = data.get(
+        "values"
+    )
+
+    if not values:
+
+        return None
+
+    candle = values[0]
+
+    return {
+
+        "time":
+            candle.get("datetime"),
+
+        "open":
+            float(candle.get("open")),
+
+        "high":
+            float(candle.get("high")),
+
+        "low":
+            float(candle.get("low")),
+
+        "close":
+            float(candle.get("close")),
+
+    }
 
 
 # =========================================================
@@ -1106,6 +1018,7 @@ def extract_trade_from_gemini(
         tp_match.group(1)
     )
 
+    # BUY
     if direction == "BUY":
 
         if not (
@@ -1114,6 +1027,7 @@ def extract_trade_from_gemini(
 
             return None
 
+    # SELL
     elif direction == "SELL":
 
         if not (
@@ -1164,7 +1078,6 @@ M1 - آخر 6 ساعات:
 {m1}
 
 حلل:
-
 - اتجاه M5
 - اتجاه M1
 - Market Structure
@@ -1204,13 +1117,653 @@ M1 - آخر 6 ساعات:
 - لا تعط Entry ثاني.
 - لا تعط SL ثاني.
 - لا تعط TP ثاني.
-- Entry يجب أن يكون هو مستوى الدخول الوحيد.
+- Entry يجب أن يكون هو مستوى الدخول الوحيد الذي تقترحه.
 - لا تقل تم الدخول.
 - لا تقل إن الصفقة مؤكدة.
 - لا تضمن الربح.
 - لا تكرر الشموع.
 - اجعل الرد أقل من 2000 حرف.
 """
+
+
+# =========================================================
+# SEND AUTOMATIC ANALYSIS
+# =========================================================
+
+async def run_auto_analysis(
+    application,
+    user_id
+):
+
+    if user_id not in autopilot_users:
+
+        return
+
+    async with analysis_lock:
+
+        if user_id not in autopilot_users:
+
+            return
+
+        existing = get_active_trade(
+            user_id
+        )
+
+        if existing:
+
+            return
+
+        try:
+
+            await application.bot.send_message(
+                chat_id=user_id,
+                text=(
+                    "🧠 Gemini يحلل الذهب...\n\n"
+                    "📊 M5: آخر 24 ساعة\n"
+                    "📉 M1: آخر 6 ساعات"
+                )
+            )
+
+            price = get_gold_price()
+
+            m5 = format_candles(
+                get_gold_m5()
+            )
+
+            m1 = format_candles(
+                get_gold_m1()
+            )
+
+            prompt = build_gold_prompt(
+                price,
+                m5,
+                m1
+            )
+
+            result = send_gemini_message(
+                prompt
+            )
+
+            trade = extract_trade_from_gemini(
+                result
+            )
+
+            # =============================================
+            # إرسال التوصية أولًا
+            # =============================================
+
+            if trade is None:
+
+                await application.bot.send_message(
+
+                    chat_id=user_id,
+
+                    text=(
+                        result
+                        + "\n\n"
+                        + "⏳ لا توجد صفقة الآن."
+                        + "\n"
+                        + "🔄 سأعيد التحليل تلقائيًا."
+                    ),
+
+                    reply_markup=stop_keyboard()
+                )
+
+                return
+
+            # =============================================
+            # سعر التسليح
+            # =============================================
+
+            armed_price = get_gold_price()
+
+            # =============================================
+            # حفظ الصفقة بعد إرسال التوصية
+            # =============================================
+
+            trade_id = create_trade(
+
+                user_id=user_id,
+
+                direction=
+                    trade["direction"],
+
+                entry=
+                    trade["entry"],
+
+                sl=
+                    trade["sl"],
+
+                tp=
+                    trade["tp"],
+
+                armed_price=
+                    armed_price
+            )
+
+            # =============================================
+            # إرسال التوصية
+            # =============================================
+
+            message = (
+                result
+                + "\n\n"
+                + "👀 المتابعة مفعلة."
+                + "\n"
+                + "⏳ الحالة: بانتظار Entry."
+                + "\n\n"
+                + f"💵 السعر وقت التوصية: "
+                f"{armed_price}"
+                + "\n"
+                + "⚠️ لن أعتبر الصفقة داخلة "
+                  "إلا عند عبور مستوى Entry "
+                  "المحدد في هذه التوصية."
+            )
+
+            await application.bot.send_message(
+
+                chat_id=user_id,
+
+                text=message,
+
+                reply_markup=
+                    active_trade_keyboard(
+                        trade_id
+                    )
+            )
+
+        except Exception as e:
+
+            print(
+                "AUTO ANALYSIS ERROR:",
+                e
+            )
+
+            if user_id in autopilot_users:
+
+                await application.bot.send_message(
+
+                    chat_id=user_id,
+
+                    text=(
+                        "⚠️ حصل خطأ مؤقت أثناء التحليل.\n"
+                        "سأحاول التحليل مرة أخرى تلقائيًا."
+                    ),
+
+                    reply_markup=stop_keyboard()
+                )
+
+
+# =========================================================
+# PROFIT / LOSS
+# =========================================================
+
+def calculate_pnl(
+    direction,
+    entry,
+    exit_price
+):
+
+    if direction == "BUY":
+
+        points = (
+            exit_price
+            - entry
+        )
+
+        percent = (
+            points
+            / entry
+        ) * 100
+
+    else:
+
+        points = (
+            entry
+            - exit_price
+        )
+
+        percent = (
+            points
+            / entry
+        ) * 100
+
+    return points, percent
+
+
+# =========================================================
+# TRADE MONITOR
+# =========================================================
+
+async def monitor_trades(
+    application
+):
+
+    print(
+        "TRADE MONITOR STARTED"
+    )
+
+    last_m1_time = None
+
+    last_price = None
+
+    while True:
+
+        try:
+
+            trades = get_all_active_trades()
+
+            # =============================================
+            # إذا لا توجد صفقات
+            # =============================================
+
+            if not trades:
+
+                await asyncio.sleep(
+                    MONITOR_SECONDS
+                )
+
+                continue
+
+            # =============================================
+            # السعر اللحظي
+            # =============================================
+
+            current_price = get_gold_price()
+
+            # =============================================
+            # آخر شمعة M1
+            # =============================================
+
+            candle = None
+
+            try:
+
+                candle = get_latest_m1()
+
+            except Exception as e:
+
+                print(
+                    "M1 monitor error:",
+                    e
+                )
+
+            # =============================================
+            # فحص كل صفقة
+            # =============================================
+
+            for trade in trades:
+
+                trade_id = trade["id"]
+
+                user_id = trade["user_id"]
+
+                # إذا المستخدم أوقف النظام
+                if user_id not in autopilot_users:
+
+                    continue
+
+                direction = trade["direction"]
+
+                entry = float(
+                    trade["entry"]
+                )
+
+                sl = float(
+                    trade["stop_loss"]
+                )
+
+                tp = float(
+                    trade["take_profit"]
+                )
+
+                armed_price = float(
+                    trade["armed_price"]
+                )
+
+                status = trade["status"]
+
+                # =========================================
+                # WAITING ENTRY
+                # =========================================
+
+                if status == "waiting_entry":
+
+                    entered = False
+
+                    # BUY:
+                    #
+                    # لا ندخل إذا السعر كان أصلًا تحت Entry
+                    # عند إنشاء التوصية.
+                    #
+                    # يجب أن يكون السعر فوق Entry ثم
+                    # يهبط ويلمس Entry.
+
+                    if direction == "BUY":
+
+                        if (
+                            armed_price > entry
+                            and current_price <= entry
+                        ):
+
+                            entered = True
+
+                        elif (
+                            last_price is not None
+                            and last_price > entry
+                            and current_price <= entry
+                        ):
+
+                            entered = True
+
+                    # SELL:
+                    #
+                    # يجب أن يكون السعر تحت Entry ثم
+                    # يصعد ويلمس Entry.
+
+                    elif direction == "SELL":
+
+                        if (
+                            armed_price < entry
+                            and current_price >= entry
+                        ):
+
+                            entered = True
+
+                        elif (
+                            last_price is not None
+                            and last_price < entry
+                            and current_price >= entry
+                        ):
+
+                            entered = True
+
+                    if entered:
+
+                        mark_entered(
+                            trade_id
+                        )
+
+                        await application.bot.send_message(
+
+                            chat_id=user_id,
+
+                            text=(
+                                "✅ تم الدخول\n\n"
+
+                                f"📊 الاتجاه: "
+                                f"{direction}\n"
+
+                                f"🎯 Entry: "
+                                f"{entry}\n"
+
+                                f"💵 سعر الدخول الفعلي: "
+                                f"{current_price}\n"
+
+                                f"🛑 SL: "
+                                f"{sl}\n"
+
+                                f"💰 TP: "
+                                f"{tp}\n\n"
+
+                                "👀 بدأت مراقبة "
+                                "SL و TP."
+                            ),
+
+                            reply_markup=
+                                active_trade_keyboard(
+                                    trade_id
+                                )
+                        )
+
+                        continue
+
+                # =========================================
+                # IN TRADE
+                # =========================================
+
+                if status == "in_trade":
+
+                    hit_tp = False
+
+                    hit_sl = False
+
+                    # =====================================
+                    # فحص السعر
+                    # =====================================
+
+                    if direction == "BUY":
+
+                        if current_price >= tp:
+
+                            hit_tp = True
+
+                        elif current_price <= sl:
+
+                            hit_sl = True
+
+                    elif direction == "SELL":
+
+                        if current_price <= tp:
+
+                            hit_tp = True
+
+                        elif current_price >= sl:
+
+                            hit_sl = True
+
+                    # =====================================
+                    # فحص High / Low لشمعة M1
+                    # =====================================
+
+                    if candle:
+
+                        high = candle["high"]
+
+                        low = candle["low"]
+
+                        if direction == "BUY":
+
+                            if high >= tp:
+
+                                hit_tp = True
+
+                            if low <= sl:
+
+                                hit_sl = True
+
+                        elif direction == "SELL":
+
+                            if low <= tp:
+
+                                hit_tp = True
+
+                            if high >= sl:
+
+                                hit_sl = True
+
+                    # =====================================
+                    # إذا تحقق TP و SL داخل نفس شمعة M1
+                    # =====================================
+
+                    if hit_tp and hit_sl:
+
+                        # لا يمكن معرفة أيهما لمس أولًا
+                        # من OHLC وحدها.
+                        #
+                        # نختار الحالة الأقرب للسعر الحالي
+                        # ونوضح أنها حالة ملتبسة.
+
+                        distance_tp = abs(
+                            current_price - tp
+                        )
+
+                        distance_sl = abs(
+                            current_price - sl
+                        )
+
+                        if distance_tp <= distance_sl:
+
+                            hit_sl = False
+
+                        else:
+
+                            hit_tp = False
+
+                    # =====================================
+                    # TAKE PROFIT
+                    # =====================================
+
+                    if hit_tp:
+
+                        exit_price = tp
+
+                        points, percent = (
+                            calculate_pnl(
+                                direction,
+                                entry,
+                                exit_price
+                            )
+                        )
+
+                        close_trade(
+
+                            trade_id,
+
+                            exit_price,
+
+                            "TP",
+
+                            points,
+
+                            percent
+                        )
+
+                        await application.bot.send_message(
+
+                            chat_id=user_id,
+
+                            text=(
+                                "🎯 تحقق Take Profit\n\n"
+
+                                f"📊 الاتجاه: "
+                                f"{direction}\n"
+
+                                f"🎯 Entry: "
+                                f"{entry}\n"
+
+                                f"💰 TP: "
+                                f"{tp}\n"
+
+                                f"📈 الربح: "
+                                f"+{points:.2f} نقطة\n"
+
+                                f"📊 النسبة: "
+                                f"+{percent:.2f}%\n\n"
+
+                                "✅ انتهت الصفقة.\n"
+                                "🧠 سأبدأ تحليلًا جديدًا تلقائيًا."
+                            )
+                        )
+
+                        # تحليل جديد بعد انتهاء الصفقة
+                        if user_id in autopilot_users:
+
+                            await asyncio.sleep(3)
+
+                            asyncio.create_task(
+                                run_auto_analysis(
+                                    application,
+                                    user_id
+                                )
+                            )
+
+                    # =====================================
+                    # STOP LOSS
+                    # =====================================
+
+                    elif hit_sl:
+
+                        exit_price = sl
+
+                        points, percent = (
+                            calculate_pnl(
+                                direction,
+                                entry,
+                                exit_price
+                            )
+                        )
+
+                        close_trade(
+
+                            trade_id,
+
+                            exit_price,
+
+                            "SL",
+
+                            points,
+
+                            percent
+                        )
+
+                        await application.bot.send_message(
+
+                            chat_id=user_id,
+
+                            text=(
+                                "🛑 تحقق Stop Loss\n\n"
+
+                                f"📊 الاتجاه: "
+                                f"{direction}\n"
+
+                                f"🎯 Entry: "
+                                f"{entry}\n"
+
+                                f"🛑 SL: "
+                                f"{sl}\n"
+
+                                f"📉 الخسارة: "
+                                f"{points:.2f} نقطة\n"
+
+                                f"📊 النسبة: "
+                                f"{percent:.2f}%\n\n"
+
+                                "❌ انتهت الصفقة.\n"
+                                "🧠 سأبدأ تحليلًا جديدًا تلقائيًا."
+                            )
+                        )
+
+                        if user_id in autopilot_users:
+
+                            await asyncio.sleep(3)
+
+                            asyncio.create_task(
+                                run_auto_analysis(
+                                    application,
+                                    user_id
+                                )
+                            )
+
+            last_price = current_price
+
+            if candle:
+
+                last_m1_time = candle["time"]
+
+        except Exception as e:
+
+            print(
+                "MONITOR LOOP ERROR:",
+                e
+            )
+
+            # لا نوقف المراقب
+            # ننتظر ثم نحاول مرة أخرى
+
+        await asyncio.sleep(
+            MONITOR_SECONDS
+        )
 
 
 # =========================================================
@@ -1229,9 +1782,13 @@ async def wait_reanalysis_loop(
         )
 
         if user_id not in autopilot_users:
+
             return
 
-        if get_active_trade(user_id):
+        if get_active_trade(
+            user_id
+        ):
+
             return
 
         await run_auto_analysis(
@@ -1275,695 +1832,6 @@ def schedule_wait_analysis(
 
 
 # =========================================================
-# SEND AUTOMATIC ANALYSIS
-# =========================================================
-
-async def run_auto_analysis(
-    application,
-    user_id
-):
-
-    if user_id not in autopilot_users:
-        return
-
-    async with analysis_lock:
-
-        if user_id not in autopilot_users:
-            return
-
-        existing = get_active_trade(
-            user_id
-        )
-
-        if existing:
-            return
-
-        try:
-
-            await application.bot.send_message(
-
-                chat_id=user_id,
-
-                text=(
-                    "🧠 Gemini يحلل الذهب...\n\n"
-                    "📊 M5: آخر 24 ساعة\n"
-                    "📉 M1: آخر 6 ساعات"
-                )
-            )
-
-            # -------------------------------------------------
-            # استخدم آخر سعر محفوظ إذا كان حديثًا
-            # -------------------------------------------------
-
-            price = get_cached_price(
-                60
-            )
-
-            if price is None:
-
-                price = get_gold_price()
-
-            # -------------------------------------------------
-            # M5 + M1
-            # -------------------------------------------------
-
-            m5 = format_candles(
-                get_gold_m5()
-            )
-
-            m1 = format_candles(
-                get_gold_m1()
-            )
-
-            prompt = build_gold_prompt(
-                price,
-                m5,
-                m1
-            )
-
-            result = send_gemini_message(
-                prompt
-            )
-
-            trade = extract_trade_from_gemini(
-                result
-            )
-
-            # =================================================
-            # WAIT
-            # =================================================
-
-            if trade is None:
-
-                await application.bot.send_message(
-
-                    chat_id=user_id,
-
-                    text=(
-                        result
-                        + "\n\n"
-                        + "⏳ لا توجد صفقة الآن."
-                        + "\n"
-                        + "🔄 سأعيد التحليل بعد 5 دقائق."
-                    ),
-
-                    reply_markup=stop_keyboard()
-                )
-
-                if user_id in autopilot_users:
-
-                    schedule_wait_analysis(
-                        application,
-                        user_id
-                    )
-
-                return
-
-            # =================================================
-            # سعر التسليح
-            #
-            # نفس سعر التحليل، بدون طلب API إضافي
-            # =================================================
-
-            armed_price = price
-
-            # =================================================
-            # حفظ الصفقة
-            # =================================================
-
-            trade_id = create_trade(
-
-                user_id=user_id,
-
-                direction=
-                    trade["direction"],
-
-                entry=
-                    trade["entry"],
-
-                sl=
-                    trade["sl"],
-
-                tp=
-                    trade["tp"],
-
-                armed_price=
-                    armed_price
-            )
-
-            # =================================================
-            # إرسال التوصية
-            # =================================================
-
-            message = (
-
-                result
-
-                + "\n\n"
-
-                + "👀 المتابعة مفعلة."
-
-                + "\n"
-
-                + "⏳ الحالة: بانتظار Entry."
-
-                + "\n\n"
-
-                + f"💵 السعر وقت التوصية: "
-                f"{armed_price}"
-
-                + "\n\n"
-
-                + "⚠️ لن أعتبر الصفقة داخلة "
-                  "إلا عند عبور Entry فعليًا."
-
-                + "\n"
-
-                + "⏱️ سأفحص السعر كل 15 ثانية."
-
-                + "\n"
-
-                + "💰 وسأرسل تحديث السعر كل 5 دقائق."
-            )
-
-            await application.bot.send_message(
-
-                chat_id=user_id,
-
-                text=message,
-
-                reply_markup=
-                    active_trade_keyboard(
-                        trade_id
-                    )
-            )
-
-        except Exception as e:
-
-            print(
-                "AUTO ANALYSIS ERROR:",
-                e
-            )
-
-            if user_id in autopilot_users:
-
-                await application.bot.send_message(
-
-                    chat_id=user_id,
-
-                    text=(
-                        "⚠️ تعذر جلب بيانات الذهب حاليًا.\n\n"
-                        f"🔎 السبب:\n{e}\n\n"
-                        "🔄 سأحاول مرة أخرى لاحقًا."
-                    ),
-
-                    reply_markup=stop_keyboard()
-                )
-
-                # إذا كان الخطأ 429
-                # لا نحاول كل ثانية.
-                # ننتظر 5 دقائق.
-
-                schedule_wait_analysis(
-                    application,
-                    user_id
-                )
-
-
-# =========================================================
-# PROFIT / LOSS
-# =========================================================
-
-def calculate_pnl(
-    direction,
-    entry,
-    exit_price
-):
-
-    if direction == "BUY":
-
-        points = (
-            exit_price
-            - entry
-        )
-
-    else:
-
-        points = (
-            entry
-            - exit_price
-        )
-
-    percent = (
-        points
-        / entry
-    ) * 100
-
-    return points, percent
-
-
-# =========================================================
-# TRADE MONITOR
-# =========================================================
-
-async def monitor_trades(
-    application
-):
-
-    print(
-        "TRADE MONITOR STARTED"
-    )
-
-    while True:
-
-        try:
-
-            trades = get_all_active_trades()
-
-            # -------------------------------------------------
-            # لا توجد صفقات:
-            # لا نطلب السعر
-            # -------------------------------------------------
-
-            if not trades:
-
-                await asyncio.sleep(
-                    MONITOR_SECONDS
-                )
-
-                continue
-
-            # -------------------------------------------------
-            # السعر السابق قبل الطلب
-            # -------------------------------------------------
-
-            previous_price = (
-                market_state["price"]
-            )
-
-            # -------------------------------------------------
-            # طلب سعر واحد فقط
-            # كل 15 ثانية
-            # -------------------------------------------------
-
-            try:
-
-                current_price = get_gold_price(
-                    force=True
-                )
-
-            except Exception as e:
-
-                print(
-                    "MONITOR PRICE ERROR:",
-                    e
-                )
-
-                await asyncio.sleep(
-                    MONITOR_SECONDS
-                )
-
-                continue
-
-            # -------------------------------------------------
-            # هل وصلنا لنهاية فترة 5 دقائق؟
-            #
-            # لا يوجد طلب API إضافي.
-            # نستخدم current_price نفسه.
-            # -------------------------------------------------
-
-            five_minute_report = (
-                is_5_minute_report_due()
-            )
-
-            # -------------------------------------------------
-            # معالجة الصفقات
-            # -------------------------------------------------
-
-            for trade in trades:
-
-                trade_id = trade["id"]
-
-                user_id = trade["user_id"]
-
-                # إذا أوقف المستخدم المتابعة
-                if user_id not in autopilot_users:
-
-                    continue
-
-                direction = trade["direction"]
-
-                entry = float(
-                    trade["entry"]
-                )
-
-                sl = float(
-                    trade["stop_loss"]
-                )
-
-                tp = float(
-                    trade["take_profit"]
-                )
-
-                status = trade["status"]
-
-                # =================================================
-                # تحديث كل 5 دقائق
-                # =================================================
-
-                if five_minute_report:
-
-                    if status == "waiting_entry":
-
-                        status_text = (
-                            "⏳ بانتظار Entry"
-                        )
-
-                    elif status == "in_trade":
-
-                        status_text = (
-                            "🔥 داخل الصفقة"
-                        )
-
-                    else:
-
-                        status_text = status
-
-                    await application.bot.send_message(
-
-                        chat_id=user_id,
-
-                        text=(
-                            "⏱️ تحديث الذهب كل 5 دقائق\n\n"
-                            f"💵 السعر: "
-                            f"{current_price}\n"
-                            f"📊 الاتجاه: "
-                            f"{direction}\n"
-                            f"🎯 Entry: "
-                            f"{entry}\n"
-                            f"🛑 SL: "
-                            f"{sl}\n"
-                            f"💰 TP: "
-                            f"{tp}\n"
-                            f"📌 الحالة: "
-                            f"{status_text}"
-                        )
-                    )
-
-                # =================================================
-                # WAITING ENTRY
-                # =================================================
-
-                if status == "waiting_entry":
-
-                    entered = False
-
-                    # -------------------------------------------------
-                    # BUY
-                    #
-                    # ندخل فقط عندما:
-                    #
-                    # السابق تحت Entry
-                    # والحالي وصل Entry أو تجاوزه
-                    #
-                    # مثال:
-                    # 4199 -> 4201
-                    # Entry = 4200
-                    #
-                    # الدخول الفعلي = 4201
-                    # -------------------------------------------------
-
-                    if direction == "BUY":
-
-                        if (
-                            previous_price is not None
-                            and previous_price < entry
-                            and current_price >= entry
-                        ):
-
-                            entered = True
-
-                    # -------------------------------------------------
-                    # SELL
-                    #
-                    # السابق فوق Entry
-                    # والحالي وصل Entry أو نزل تحته
-                    #
-                    # مثال:
-                    # 4201 -> 4199
-                    # Entry = 4200
-                    # -------------------------------------------------
-
-                    elif direction == "SELL":
-
-                        if (
-                            previous_price is not None
-                            and previous_price > entry
-                            and current_price <= entry
-                        ):
-
-                            entered = True
-
-                    # -------------------------------------------------
-                    # دخول فعلي
-                    # -------------------------------------------------
-
-                    if entered:
-
-                        mark_entered(
-                            trade_id,
-                            current_price
-                        )
-
-                        await application.bot.send_message(
-
-                            chat_id=user_id,
-
-                            text=(
-                                "🔥 دخلنا الصفقة\n\n"
-
-                                f"📊 الاتجاه: "
-                                f"{direction}\n"
-
-                                f"🎯 Entry المخطط: "
-                                f"{entry}\n"
-
-                                f"💵 سعر الدخول الفعلي: "
-                                f"{current_price}\n"
-
-                                f"🛑 SL: "
-                                f"{sl}\n"
-
-                                f"💰 TP: "
-                                f"{tp}\n\n"
-
-                                "🔥 الحالة: داخل الصفقة.\n"
-                                "👀 أراقب SL وTP."
-                            ),
-
-                            reply_markup=
-                                active_trade_keyboard(
-                                    trade_id
-                                )
-                        )
-
-                        continue
-
-                # =================================================
-                # IN TRADE
-                # =================================================
-
-                if status == "in_trade":
-
-                    hit_tp = False
-
-                    hit_sl = False
-
-                    # -------------------------------------------------
-                    # فحص السعر الحالي
-                    # -------------------------------------------------
-
-                    if direction == "BUY":
-
-                        if current_price >= tp:
-
-                            hit_tp = True
-
-                        elif current_price <= sl:
-
-                            hit_sl = True
-
-                    elif direction == "SELL":
-
-                        if current_price <= tp:
-
-                            hit_tp = True
-
-                        elif current_price >= sl:
-
-                            hit_sl = True
-
-                    # =================================================
-                    # TP
-                    # =================================================
-
-                    if hit_tp:
-
-                        exit_price = tp
-
-                        points, percent = (
-                            calculate_pnl(
-                                direction,
-                                entry,
-                                exit_price
-                            )
-                        )
-
-                        close_trade(
-
-                            trade_id,
-
-                            exit_price,
-
-                            "TP",
-
-                            points,
-
-                            percent
-                        )
-
-                        await application.bot.send_message(
-
-                            chat_id=user_id,
-
-                            text=(
-                                "🎯 تحقق Take Profit\n\n"
-
-                                f"📊 الاتجاه: "
-                                f"{direction}\n"
-
-                                f"🎯 Entry: "
-                                f"{entry}\n"
-
-                                f"💵 الخروج: "
-                                f"{exit_price}\n"
-
-                                f"📈 النتيجة: "
-                                f"{points:+.2f} نقطة\n"
-
-                                f"📊 النسبة: "
-                                f"{percent:+.2f}%\n\n"
-
-                                "✅ انتهت الصفقة.\n"
-                                "🧠 سأبدأ تحليلًا جديدًا."
-                            )
-                        )
-
-                        if user_id in autopilot_users:
-
-                            await asyncio.sleep(3)
-
-                            asyncio.create_task(
-
-                                run_auto_analysis(
-
-                                    application,
-
-                                    user_id
-
-                                )
-
-                            )
-
-                    # =================================================
-                    # SL
-                    # =================================================
-
-                    elif hit_sl:
-
-                        exit_price = sl
-
-                        points, percent = (
-                            calculate_pnl(
-                                direction,
-                                entry,
-                                exit_price
-                            )
-                        )
-
-                        close_trade(
-
-                            trade_id,
-
-                            exit_price,
-
-                            "SL",
-
-                            points,
-
-                            percent
-                        )
-
-                        await application.bot.send_message(
-
-                            chat_id=user_id,
-
-                            text=(
-                                "🛑 تحقق Stop Loss\n\n"
-
-                                f"📊 الاتجاه: "
-                                f"{direction}\n"
-
-                                f"🎯 Entry: "
-                                f"{entry}\n"
-
-                                f"💵 الخروج: "
-                                f"{exit_price}\n"
-
-                                f"📉 النتيجة: "
-                                f"{points:+.2f} نقطة\n"
-
-                                f"📊 النسبة: "
-                                f"{percent:+.2f}%\n\n"
-
-                                "❌ انتهت الصفقة.\n"
-                                "🧠 سأبدأ تحليلًا جديدًا."
-                            )
-                        )
-
-                        if user_id in autopilot_users:
-
-                            await asyncio.sleep(3)
-
-                            asyncio.create_task(
-
-                                run_auto_analysis(
-
-                                    application,
-
-                                    user_id
-
-                                )
-
-                            )
-
-        except Exception as e:
-
-            print(
-                "MONITOR LOOP ERROR:",
-                e
-            )
-
-        # -------------------------------------------------
-        # الانتظار 15 ثانية
-        # -------------------------------------------------
-
-        await asyncio.sleep(
-            MONITOR_SECONDS
-        )
-
-
-# =========================================================
 # START
 # =========================================================
 
@@ -1977,14 +1845,6 @@ async def start_command(
     autopilot_users.discard(
         user_id
     )
-
-    old_task = user_wait_tasks.pop(
-        user_id,
-        None
-    )
-
-    if old_task:
-        old_task.cancel()
 
     await update.message.reply_text(
 
@@ -2061,10 +1921,7 @@ async def handle_text(
         )
 
         await update.message.reply_text(
-
-            "❌ حدث خطأ أثناء الاتصال بـ Gemini.",
-
-            reply_markup=main_keyboard()
+            "❌ حدث خطأ أثناء الاتصال بـ Gemini."
         )
 
 
@@ -2082,14 +1939,7 @@ async def show_current_price(
 
     try:
 
-        # استخدم الكاش أولًا
-        price = get_cached_price(
-            30
-        )
-
-        if price is None:
-
-            price = get_gold_price()
+        price = get_gold_price()
 
         await query.edit_message_text(
 
@@ -2108,17 +1958,14 @@ async def show_current_price(
 
         await query.edit_message_text(
 
-            (
-                "❌ تعذر الحصول على السعر.\n\n"
-                f"🔎 {e}"
-            ),
+            "❌ تعذر الحصول على السعر.",
 
             reply_markup=main_keyboard()
         )
 
 
 # =========================================================
-# M5 ANALYSIS
+# M5 ANALYSIS ONLY
 # =========================================================
 
 async def show_m5_analysis(
@@ -2135,12 +1982,7 @@ async def show_m5_analysis(
             "⏳ جاري تحليل M5..."
         )
 
-        price = get_cached_price(
-            30
-        )
-
-        if price is None:
-            price = get_gold_price()
+        price = get_gold_price()
 
         candles = format_candles(
             get_gold_m5()
@@ -2156,16 +1998,11 @@ async def show_m5_analysis(
 {candles}
 
 ركز على:
-
-الاتجاه،
-Market Structure،
-الدعم،
-المقاومة،
-الزخم،
+الاتجاه، Market Structure،
+الدعم، المقاومة، الزخم،
 الاختراق والرفض.
 
 رد مختصر جدًا مناسب لـTelegram.
-
 لا تعط توصية دخول.
 لا تكرر الشموع.
 """
@@ -2190,17 +2027,14 @@ Market Structure،
 
         await query.edit_message_text(
 
-            (
-                "❌ حدث خطأ في تحليل M5.\n\n"
-                f"🔎 {e}"
-            ),
+            "❌ حدث خطأ في تحليل M5.",
 
             reply_markup=main_keyboard()
         )
 
 
 # =========================================================
-# M1 ANALYSIS
+# M1 ANALYSIS ONLY
 # =========================================================
 
 async def show_m1_analysis(
@@ -2217,12 +2051,7 @@ async def show_m1_analysis(
             "⏳ جاري تحليل M1..."
         )
 
-        price = get_cached_price(
-            30
-        )
-
-        if price is None:
-            price = get_gold_price()
+        price = get_gold_price()
 
         candles = format_candles(
             get_gold_m1()
@@ -2238,16 +2067,11 @@ async def show_m1_analysis(
 {candles}
 
 ركز على:
-
-الاتجاه،
-Market Structure،
-الدعم،
-المقاومة،
-الزخم،
+الاتجاه، Market Structure،
+الدعم، المقاومة، الزخم،
 الاختراق والرفض.
 
 رد مختصر جدًا مناسب لـTelegram.
-
 لا تعط توصية دخول.
 لا تكرر الشموع.
 """
@@ -2272,10 +2096,7 @@ Market Structure،
 
         await query.edit_message_text(
 
-            (
-                "❌ حدث خطأ في تحليل M1.\n\n"
-                f"🔎 {e}"
-            ),
+            "❌ حدث خطأ في تحليل M1.",
 
             reply_markup=main_keyboard()
         )
@@ -2299,7 +2120,7 @@ async def button_handler(
     user_id = update.effective_user.id
 
     # =====================================================
-    # BACK MENU
+    # MAIN MENU
     # =====================================================
 
     if data == "back_menu":
@@ -2318,6 +2139,7 @@ async def button_handler(
         )
 
         if old_task:
+
             old_task.cancel()
 
         await query.edit_message_text(
@@ -2335,6 +2157,7 @@ async def button_handler(
 
     if data == "gemini_analysis":
 
+        # تشغيل الوضع التلقائي
         autopilot_users.add(
             user_id
         )
@@ -2345,8 +2168,10 @@ async def button_handler(
         )
 
         if old_task:
+
             old_task.cancel()
 
+        # إذا توجد صفقة بالفعل
         existing = get_active_trade(
             user_id
         )
@@ -2370,7 +2195,7 @@ async def button_handler(
                     f"💰 TP: "
                     f"{existing['take_profit']}\n\n"
 
-                    f"📌 الحالة: "
+                    f"الحالة: "
                     f"{existing['status']}"
                 ),
 
@@ -2391,12 +2216,10 @@ async def button_handler(
         )
 
         asyncio.create_task(
-
             run_auto_analysis(
                 context.application,
                 user_id
             )
-
         )
 
         return
@@ -2421,6 +2244,7 @@ async def button_handler(
         )
 
         if old_task:
+
             old_task.cancel()
 
         await query.edit_message_text(
@@ -2500,11 +2324,9 @@ async def post_init(
     )
 
     asyncio.create_task(
-
         monitor_trades(
             application
         )
-
     )
 
 
@@ -2528,10 +2350,7 @@ def main():
 
     init_database()
 
-    # -----------------------------------------------------
     # Flask
-    # -----------------------------------------------------
-
     threading.Thread(
 
         target=run_web_server,
@@ -2539,10 +2358,6 @@ def main():
         daemon=True
 
     ).start()
-
-    # -----------------------------------------------------
-    # Telegram
-    # -----------------------------------------------------
 
     application = (
 
@@ -2554,52 +2369,38 @@ def main():
 
     )
 
-    # -----------------------------------------------------
     # Commands
-    # -----------------------------------------------------
 
     application.add_handler(
-
         CommandHandler(
             "start",
             start_command
         )
-
     )
 
     application.add_handler(
-
         CommandHandler(
             "models",
             models_command
         )
-
     )
 
-    # -----------------------------------------------------
     # Buttons
-    # -----------------------------------------------------
 
     application.add_handler(
-
         CallbackQueryHandler(
             button_handler
         )
-
     )
 
-    # -----------------------------------------------------
     # Chat
-    # -----------------------------------------------------
 
     application.add_handler(
-
         MessageHandler(
             filters.TEXT
             & ~filters.COMMAND,
             handle_text
         )
-
     )
 
     print(
